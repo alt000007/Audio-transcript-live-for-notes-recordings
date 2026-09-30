@@ -169,6 +169,7 @@
       <div class="field" style="border-top:1px solid var(--border);padding-top:14px">
         <label for="importfile">Or import a recording</label>
         <input id="importfile" class="input" type="file" accept="audio/*,.m4a,.mp3,.wav,.aac,.ogg,.webm">
+        <button id="importnative" class="btn block" hidden>Choose a recording</button>
         <div class="hint">
           <span id="importhint">Your phone&rsquo;s own voice recorder keeps running with the screen off and other
           apps in front &mdash; this page cannot. Record a class there, then bring the file here to
@@ -1520,33 +1521,61 @@ $('v-tx').onclick = () => { $('notes-out').hidden = true; $('tx-out').hidden = f
 
 $('record').onclick = () => (recordingNow() ? stopRecording() : startRecording());
 
-$('importfile').onchange = async (e) => {
-  const file = e.target.files?.[0];
-  if (!file) return;
-  if (recordingNow()) { alertBox('warn', 'Stop the current recording before importing.'); e.target.value = ''; return; }
-
+async function runImport(file) {
+  if (recordingNow()) { alertBox('warn', 'Stop the current recording before importing.'); return; }
   const status = $('importstatus'), msg = $('importmsg');
   status.hidden = false;
   $('importfile').disabled = true;
-  const show1 = (t) => { msg.textContent = t; };
-  show1('Starting\u2026');
+  $('importnative').disabled = true;
+  const progress = (t) => { msg.textContent = t; };
+  progress('Starting…');
   try {
-    await importRecording(file, show1);
+    await importRecording(file, progress);
     saveSession();
     renderNotes();
-    if (doneText()) {
-      show('notes');
-    } else {
-      alertBox('warn', 'That file transcribed to nothing. Check it actually contains speech.');
-    }
+    if (doneText()) show('notes');
+    else alertBox('warn', 'That file transcribed to nothing. Check it actually contains speech.');
   } catch (err) {
     alertBox('error', escapeHtml(err.message));
   } finally {
     status.hidden = true;
     $('importfile').disabled = false;
-    e.target.value = '';
+    $('importnative').disabled = false;
+  }
+}
+
+$('importfile').onchange = async (e) => {
+  const file = e.target.files?.[0];
+  if (file) await runImport(file);
+  e.target.value = '';
+};
+
+// In the app, ask the host for the file directly. A WebView's file input is
+// inert unless the host implements a chooser for it, so going straight to the
+// host removes the part most likely to do nothing at all.
+$('importnative').onclick = () => {
+  try { window.ScribeNative.pickFile(); }
+  catch { alertBox('error', 'Could not open the file picker.'); }
+};
+
+/** The app has copied the pick somewhere the page can read it. */
+window.__scribeFilePicked = async (url, name) => {
+  const status = $('importstatus'), msg = $('importmsg');
+  status.hidden = false;
+  msg.textContent = 'Reading the file…';
+  try {
+    const res = await fetch(url);
+    if (!res.ok) throw new Error(`Could not read the chosen file (${res.status}).`);
+    const blob = await res.blob();
+    // Whisper picks the container from the filename, so keep the real one.
+    await runImport(new File([blob], name || 'recording.m4a', { type: blob.type || 'audio/mp4' }));
+  } catch (err) {
+    status.hidden = true;
+    alertBox('error', escapeHtml(err.message));
   }
 };
+
+window.__scribeFileCancelled = () => { $('importstatus').hidden = true; };
 $('pause').onclick = togglePause;
 
 $('gen').onclick = async () => {
@@ -1645,6 +1674,8 @@ $('maxseg').oninput = (e) => { settings.maxSeg = +e.target.value; LS.set('maxSeg
       '<strong>Edge</strong>, or add a free Groq key under Settings to use Whisper instead.', false);
   }
   if (NATIVE) {
+    $('importfile').hidden = true;
+    $('importnative').hidden = false;
     $('importhint').textContent =
       'Already recorded something elsewhere? Pick the file and it will be transcribed the same way.';
   }
