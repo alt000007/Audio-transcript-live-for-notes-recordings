@@ -2,12 +2,16 @@ package app.scribe
 
 import android.Manifest
 import android.annotation.SuppressLint
+import android.content.ActivityNotFoundException
+import android.content.Intent
 import android.content.pm.PackageManager
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.util.Base64
 import android.webkit.JavascriptInterface
 import android.webkit.PermissionRequest
+import android.webkit.ValueCallback
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
@@ -32,6 +36,18 @@ class MainActivity : AppCompatActivity() {
 
     private lateinit var web: WebView
     private var pendingStart = false
+
+    /** The page's pending <input type="file">, waiting on the picker. */
+    private var fileChooser: ValueCallback<Array<Uri>>? = null
+
+    private val pickFile = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+        val cb = fileChooser
+        fileChooser = null
+        // parseResult yields null when the user backed out, and the callback
+        // must still be answered — leaving it unanswered wedges the input so
+        // every later tap does nothing at all.
+        cb?.onReceiveValue(WebChromeClient.FileChooserParams.parseResult(result.resultCode, result.data))
+    }
 
     private val askMic = registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
         if (granted && pendingStart) beginRecording() else if (!granted) {
@@ -65,6 +81,39 @@ class MainActivity : AppCompatActivity() {
                     // Only ever the microphone, and only once Android has granted it to us.
                     val wants = request.resources.filter { it == PermissionRequest.RESOURCE_AUDIO_CAPTURE }
                     if (wants.isNotEmpty() && hasMic()) request.grant(wants.toTypedArray()) else request.deny()
+                }
+
+                /**
+                 * A WebView has no file picker of its own: without this, the
+                 * page's file input silently does nothing when tapped.
+                 */
+                override fun onShowFileChooser(
+                    view: WebView,
+                    callback: ValueCallback<Array<Uri>>,
+                    params: WebChromeClient.FileChooserParams,
+                ): Boolean {
+                    fileChooser?.onReceiveValue(null)   // abandon any earlier one
+                    fileChooser = callback
+                    val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+                        addCategory(Intent.CATEGORY_OPENABLE)
+                        // Filtering strictly on audio/* greys out recordings that
+                        // were saved with a vague type, which is common enough
+                        // that it would look like the same bug all over again.
+                        type = "*/*"
+                        putExtra(
+                            Intent.EXTRA_MIME_TYPES,
+                            arrayOf("audio/*", "video/mp4", "application/ogg", "application/octet-stream"),
+                        )
+                    }
+                    return try {
+                        pickFile.launch(intent)
+                        true
+                    } catch (e: ActivityNotFoundException) {
+                        fileChooser = null
+                        callback.onReceiveValue(null)
+                        toJs("window.__scribeError && window.__scribeError(${json("No app on this phone can pick a file.")})")
+                        false
+                    }
                 }
             }
             addJavascriptInterface(Bridge(), "ScribeNative")
