@@ -1,0 +1,61 @@
+name: Build Android APK
+
+# Builds a debug APK. Debug is deliberate: it is self-signed, so it installs by
+# sideload with no Play account and no release keystore.
+on:
+  push:
+    branches: ["claude/audio-transcription-app-2wmwvz", "main"]
+    paths:
+      - "android/**"
+      - ".github/workflows/android.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: android-actions/setup-android@v3
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Build debug APK
+        working-directory: android
+        run: gradle --no-daemon assembleDebug
+
+      - name: Name the APK by commit
+        id: apk
+        run: |
+          src=android/app/build/outputs/apk/debug/app-debug.apk
+          test -f "$src" || { echo "APK not found"; exit 1; }
+          out="scribe-${GITHUB_SHA::7}.apk"
+          cp "$src" "$out"
+          echo "path=$out" >> "$GITHUB_OUTPUT"
+          ls -la "$out"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: scribe-apk
+          path: ${{ steps.apk.outputs.path }}
+          if-no-files-found: error
+
+      # A release gives a plain download link that works in a phone browser,
+      # which an Actions artifact does not.
+      - name: Publish to the latest-android release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete latest-android --yes --cleanup-tag 2>/dev/null || true
+          gh release create latest-android "${{ steps.apk.outputs.path }}" \
+            --title "Scribe for Android (latest)" \
+            --notes "Debug build of ${GITHUB_SHA::7}. Download the .apk on your phone and open it to install." \
+            --target "$GITHUB_SHA"

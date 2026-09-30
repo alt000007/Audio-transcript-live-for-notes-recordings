@@ -176,9 +176,9 @@
         <label for="importfile">Or import a recording</label>
         <input id="importfile" class="input" type="file" accept="audio/*,.m4a,.mp3,.wav,.aac,.ogg,.webm">
         <div class="hint">
-          Your phone&rsquo;s own voice recorder keeps running with the screen off and other apps in
-          front &mdash; this page cannot. Record a class there, then bring the file here to
-          transcribe it. Needs a Groq key.
+          <span id="importhint">Your phone&rsquo;s own voice recorder keeps running with the screen off and other
+          apps in front &mdash; this page cannot. Record a class there, then bring the file here to
+          transcribe it. Needs a Groq key.</span>
         </div>
         <div id="importstatus" class="row small muted" style="margin-top:10px" hidden>
           <span class="spin"></span><span id="importmsg"></span>
@@ -266,7 +266,7 @@
       </div>
     </div>
     <div class="card small muted">
-      <div class="tiny faint mono" style="float:right">build 2026-09-30 11:12 UTC</div>
+      <div class="tiny faint mono" style="float:right">build 2026-09-30 11:25 UTC</div>
       <strong style="color:var(--text)">What this is.</strong>
       A single-file version of Scribe for trying the pipeline. It keeps one recording at a time
       plus a list of saved transcripts in this browser. The full app adds accounts, cross-device
@@ -518,6 +518,46 @@ class Recorder {
   }
 }
 
+/* ══════════════ the native Android shell ══════════════
+   When this page is running inside the Scribe app, capture happens in a
+   foreground service instead of the browser, so it survives the screen going
+   off and other apps coming to the front. The service hands back the same
+   encoded segments the web recorder would have produced, so everything
+   downstream — the queue, Whisper, the notes pass — is unchanged. */
+
+const NATIVE = (() => {
+  try { return Boolean(window.ScribeNative && window.ScribeNative.isNative()); } catch { return false; }
+})();
+
+function b64ToBlob(b64, type) {
+  const bin = atob(b64);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return new Blob([bytes], { type });
+}
+
+/** Called by the app as each segment is encoded. */
+window.__scribeSegment = (index, startMs, endMs, b64) => {
+  if (!session) return;
+  session.segments.push({
+    index, startMs, endMs,
+    blob: b64ToBlob(b64, 'audio/mp4'),
+    text: '', status: 'pending', attempts: 0, error: null,
+  });
+  session.segments.sort((a, b) => a.index - b.index);
+  renderLive(); renderNotesHeader();
+  drain();
+};
+
+/** Called by the app when recording actually starts or stops, including when
+ *  it was stopped from the notification rather than from this page. */
+window.__scribeState = (recording) => {
+  if (recording && !nativeRecording) beginNativeSession();
+  if (!recording && nativeRecording) endNativeSession();
+};
+
+window.__scribeError = (message) => alertBox('error', escapeHtml(String(message)));
+
 /* ══════════════ browser speech recognition ══════════════
    Chrome and Edge ship a speech recogniser that costs nothing and needs no
    account, so it is the default when no Groq key is present. It streams
@@ -650,6 +690,9 @@ class Meter {
 
 /** Which engine will actually run, given the setting and what is available. */
 function activeEngine() {
+  // In the app, capture is native and Whisper is the only transcriber; the
+  // browser recogniser has no way to run in the background.
+  if (NATIVE) return 'native';
   if (settings.engine === 'whisper') return 'whisper';
   if (settings.engine === 'webspeech') return 'webspeech';
   return settings.key ? 'whisper' : (SR ? 'webspeech' : 'none');
@@ -960,6 +1003,7 @@ let session = null;   // { title, startedAt, durationMs, segments: [], notes }
 let noKeyBanner = null;
 let stallBanner = null;
 let rec = null, speech = null, meter = null, interim = '';
+let nativeRecording = false;
 let elapsed = 0, tickTimer = null, queueRunning = false;
 
 function doneText() {
@@ -1157,7 +1201,41 @@ function renderSaved() {
 }
 
 /* ══════════════ recording flow ══════════════ */
-function recordingNow() { return Boolean(rec || speech); }
+function recordingNow() { return Boolean(rec || speech || nativeRecording); }
+
+/* The app owns the microphone in native mode, so this side only tracks the
+   session and the clock. Recording can also be stopped from the notification,
+   which arrives here as __scribeState(false). */
+function beginNativeSession() {
+  if (nativeRecording) return;
+  nativeRecording = true;
+  session = {
+    title: $('title').value.trim() || `Recording — ${new Date().toLocaleString([], { dateStyle: 'short', timeStyle: 'short' })}`,
+    startedAt: Date.now(), durationMs: 0, segments: [], notes: null, engine: 'native',
+  };
+  elapsed = 0; interim = '';
+  setRecordingChrome(true);
+  $('pause').hidden = true;   // the service records straight through
+  clock = { t0: Date.now(), pausedTotal: 0, pausedAt: 0, paused: false };
+  tickTimer = setInterval(() => {
+    elapsed = Date.now() - clock.t0 - clock.pausedTotal;
+    $('timer').textContent = fmt(elapsed);
+  }, 250);
+  renderLive(); renderNotesHeader();
+}
+
+async function endNativeSession() {
+  if (!nativeRecording) return;
+  nativeRecording = false;
+  clearInterval(tickTimer); tickTimer = null;
+  if (clock) elapsed = Date.now() - clock.t0 - clock.pausedTotal;
+  if (session) session.durationMs = elapsed;
+  setRecordingChrome(false);
+  renderLive(); renderNotesHeader();
+  await drain();
+  saveSession();
+  if (doneText()) show('notes');
+}
 
 function setRecordingChrome(on) {
   $('record').setAttribute('aria-label', on ? 'Stop recording' : 'Start recording');
@@ -1168,7 +1246,7 @@ function setRecordingChrome(on) {
   if (on) $('pause').textContent = 'Pause';
   $('setup').hidden = on;
   $('status').innerHTML = on
-    ? '<span class="dot"></span> <span class="small muted">Recording</span>'
+    ? `<span class="dot"></span> <span class="small muted">Recording${NATIVE ? ' — keeps going with the screen off' : ''}</span>`
     : '<span class="small faint">Ready</span>';
   if (!on) $('level').style.width = '0%';
 }
@@ -1177,6 +1255,18 @@ let clock = null;
 
 async function startRecording() {
   const engine = activeEngine();
+
+  if (engine === 'native') {
+    if (!settings.key) {
+      alertBox('warn', 'Background recording transcribes with Whisper, which needs a free Groq key. Add one under <strong>Settings</strong> — recording will start once you have.');
+      return;
+    }
+    // The service confirms via __scribeState, so the UI follows the real
+    // recorder rather than assuming it started.
+    window.ScribeNative.startRecording();
+    return;
+  }
+
   if (engine === 'none') {
     alertBox('error', 'This browser has no built-in speech recognition. Use Chrome or Edge, or add a free Groq key under <strong>Settings</strong>.');
     return;
@@ -1263,6 +1353,7 @@ async function teardown() {
 }
 
 async function stopRecording() {
+  if (nativeRecording) { window.ScribeNative.stopRecording(); return; }
   // Recompute rather than trusting the display interval: the browser throttles
   // it in the background, so it can be minutes behind by the time you stop.
   if (clock) elapsed = Date.now() - clock.t0 - clock.pausedTotal - (clock.paused ? Date.now() - clock.pausedAt : 0);
@@ -1393,6 +1484,7 @@ $('dl').onclick = () => {
 function renderEngineHint() {
   const e = activeEngine();
   const text =
+    e === 'native'    ? 'Recording happens in the app, so it continues with the screen off and other apps in front. Transcribed with Whisper, which needs the Groq key below.' :
     e === 'webspeech' ? 'Using your browser\u2019s own recogniser. Free, no account, words appear as you speak. Chrome and Edge only, and it needs a connection.' :
     e === 'whisper'   ? 'Using Whisper on Groq. More accurate on jargon and accents, and the glossary below is fed to it while it decodes. Text arrives a few seconds behind.' :
                         'No engine available. This browser has no speech recognition \u2014 add a Groq key, or use Chrome or Edge.';
@@ -1430,7 +1522,11 @@ $('maxseg').oninput = (e) => { settings.maxSeg = +e.target.value; LS.set('maxSeg
     alertBox('error', 'This browser cannot record audio. Try Chrome, Edge or Safari.', false);
   }
   const e = activeEngine();
-  if (e === 'webspeech') {
+  if (e === 'native' && !settings.key) {
+    noKeyBanner = alertBox('warn',
+      'Add a free Groq key under <strong>Settings</strong> to transcribe. Background recording uses Whisper — ' +
+      'the browser recogniser cannot run with the screen off.');
+  } else if (e === 'webspeech') {
     noKeyBanner = alertBox('info',
       'Ready to record using your browser\u2019s own speech recognition \u2014 no account needed. ' +
       'For better accuracy on jargon and accents, add a free Groq key under <strong>Settings</strong>.');
@@ -1438,6 +1534,10 @@ $('maxseg').oninput = (e) => { settings.maxSeg = +e.target.value; LS.set('maxSeg
     alertBox('warn',
       'This browser has no built-in speech recognition. Open this page in <strong>Chrome</strong> or ' +
       '<strong>Edge</strong>, or add a free Groq key under Settings to use Whisper instead.', false);
+  }
+  if (NATIVE) {
+    $('importhint').textContent =
+      'Already recorded something elsewhere? Pick the file and it will be transcribed the same way.';
   }
   renderEngineHint();
   renderLive(); renderNotes(); renderSaved();

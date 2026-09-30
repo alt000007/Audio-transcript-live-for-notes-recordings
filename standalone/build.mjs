@@ -13,6 +13,7 @@ import { fileURLToPath } from 'node:url'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const DOCS = resolve(HERE, '..', 'docs')
+const ANDROID = resolve(HERE, '..', 'android', 'app', 'src', 'main', 'assets')
 
 const stamp = new Date().toISOString().slice(0, 16).replace('T', ' ') + ' UTC'
 // Stamped at build time, not written by hand: a hand-written stamp goes stale
@@ -53,6 +54,12 @@ if (!docs.includes('manifest.webmanifest') || !docs.includes('serviceWorker')) {
 }
 await writeFile(join(DOCS, 'index.html'), docs)
 
+// ── 3. the copy bundled inside the Android app ────────────────────────────
+// No manifest and no service worker: the app is already installed, and both
+// would 404 against the asset origin.
+await writeFile(join(ANDROID, 'index.html'), html)
+
 console.log(`build stamp            ${stamp}`)
 console.log(`standalone/scribe.mjs  ${(mjs.length / 1024).toFixed(1)} KB`)
 console.log(`docs/index.html        ${(docs.length / 1024).toFixed(1)} KB`)
+console.log(`android assets         ${(html.length / 1024).toFixed(1)} KB`)
