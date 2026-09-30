@@ -24,6 +24,7 @@ import androidx.core.content.ContextCompat
 import androidx.webkit.WebViewAssetLoader
 import org.json.JSONObject
 import java.io.File
+import kotlin.concurrent.thread
 
 /**
  * Hosts the existing web app and gives it a microphone that keeps working when
@@ -40,6 +41,10 @@ class MainActivity : AppCompatActivity() {
     private var pendingStart = false
 
     private lateinit var imports: File
+
+    /** A share that arrived before the page was ready to receive it. */
+    private var pendingShare: Uri? = null
+    private var pageReady = false
 
     /** The page's pending <input type="file">, waiting on the picker. */
     private var fileChooser: ValueCallback<Array<Uri>>? = null
@@ -96,6 +101,12 @@ class MainActivity : AppCompatActivity() {
             webViewClient = object : WebViewClient() {
                 override fun shouldInterceptRequest(view: WebView, request: WebResourceRequest): WebResourceResponse? =
                     loader.shouldInterceptRequest(request.url)
+
+                override fun onPageFinished(view: WebView, url: String) {
+                    pageReady = true
+                    // A share can arrive before there is anything to hand it to.
+                    pendingShare?.let { pendingShare = null; copyIn(it) }
+                }
             }
             webChromeClient = object : WebChromeClient() {
                 override fun onPermissionRequest(request: PermissionRequest) {
@@ -140,10 +151,34 @@ class MainActivity : AppCompatActivity() {
             askNotify.launch(Manifest.permission.POST_NOTIFICATIONS)
         }
 
+        handleShare(intent)
+
         RecordingService.listener = { seg -> deliver(seg) }
         RecordingService.errorListener = { msg ->
             runOnUiThread { toJs("window.__scribeError && window.__scribeError(${json(msg)})") }
         }
+    }
+
+    /** singleTask means a second share reuses this activity rather than
+     *  starting another, so it arrives here instead of onCreate. */
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        handleShare(intent)
+    }
+
+    /** Picks the audio out of a share or an open request, if there is one. */
+    private fun handleShare(intent: Intent?) {
+        val uri: Uri? = when (intent?.action) {
+            Intent.ACTION_SEND ->
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU)
+                    intent.getParcelableExtra(Intent.EXTRA_STREAM, Uri::class.java)
+                else @Suppress("DEPRECATION") intent.getParcelableExtra(Intent.EXTRA_STREAM)
+            Intent.ACTION_VIEW -> intent.data
+            else -> null
+        } ?: return
+
+        if (pageReady) copyIn(uri) else pendingShare = uri
     }
 
     override fun onResume() {
@@ -219,25 +254,29 @@ class MainActivity : AppCompatActivity() {
      * and hands the page a URL it can fetch.
      */
     private fun copyIn(uri: Uri) {
-        val name = displayName(uri)
-        val ext = name.substringAfterLast('.', "").takeIf { it.length in 1..5 && it.all(Char::isLetterOrDigit) } ?: "m4a"
-        val dest = File(imports, "pick-${System.currentTimeMillis()}.$ext")
+        // Off the main thread: a lecture can be tens of megabytes, and copying
+        // that where the UI runs would freeze the app long enough to be killed.
+        thread(isDaemon = true) {
+            val name = displayName(uri)
+            val ext = name.substringAfterLast('.', "").takeIf { it.length in 1..5 && it.all(Char::isLetterOrDigit) } ?: "m4a"
+            val dest = File(imports, "pick-${System.currentTimeMillis()}.$ext")
 
-        val ok = runCatching {
-            imports.listFiles()?.forEach { it.delete() }   // only ever one at a time
-            contentResolver.openInputStream(uri)?.use { input ->
-                dest.outputStream().use { output -> input.copyTo(output) }
-            } ?: return@runCatching false
-            dest.length() > 0
-        }.getOrDefault(false)
+            val ok = runCatching {
+                imports.listFiles()?.forEach { it.delete() }   // only ever one at a time
+                contentResolver.openInputStream(uri)?.use { input ->
+                    dest.outputStream().use { output -> input.copyTo(output) }
+                } ?: return@runCatching false
+                dest.length() > 0
+            }.getOrDefault(false)
 
-        runOnUiThread {
-            if (!ok) {
-                dest.delete()
-                toJs("window.__scribeError && window.__scribeError(${json("That file could not be read.")})")
-            } else {
-                val url = "https://appassets.androidplatform.net/imports/${dest.name}"
-                toJs("window.__scribeFilePicked && window.__scribeFilePicked(${json(url)}, ${json(name)})")
+            runOnUiThread {
+                if (!ok) {
+                    dest.delete()
+                    toJs("window.__scribeError && window.__scribeError(${json("That file could not be read.")})")
+                } else {
+                    val url = "https://appassets.androidplatform.net/imports/${dest.name}"
+                    toJs("window.__scribeFilePicked && window.__scribeFilePicked(${json(url)}, ${json(name)})")
+                }
             }
         }
     }

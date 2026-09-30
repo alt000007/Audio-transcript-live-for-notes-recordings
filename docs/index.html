@@ -172,6 +172,7 @@
         <label for="title">Title</label>
         <input id="title" class="input" placeholder="e.g. Organic chemistry — week 4">
       </div>
+      <div class="tiny faint mono" id="buildline" style="text-align:right">2026-09-30 15:15 UTC</div>
       <div class="field" style="border-top:1px solid var(--border);padding-top:14px">
         <label for="importfile">Or import a recording</label>
         <input id="importfile" class="input" type="file" accept="audio/*,.m4a,.mp3,.wav,.aac,.ogg,.webm">
@@ -268,7 +269,7 @@
       </div>
     </div>
     <div class="card small muted">
-      <div class="tiny faint mono" style="float:right">build 2026-09-30 15:00 UTC</div>
+      <div class="tiny faint mono" style="float:right">build 2026-09-30 15:15 UTC</div>
       <strong style="color:var(--text)">What this is.</strong>
       A single-file version of Scribe for trying the pipeline. It keeps one recording at a time
       plus a list of saved transcripts in this browser. The full app adds accounts, cross-device
@@ -1682,8 +1683,9 @@ $('maxseg').oninput = (e) => { settings.maxSeg = +e.target.value; LS.set('maxSeg
   if (NATIVE) {
     $('importfile').hidden = true;
     $('importnative').hidden = false;
-    $('importhint').textContent =
-      'Already recorded something elsewhere? Pick the file and it will be transcribed the same way.';
+    $('importhint').innerHTML =
+      'Already recorded something elsewhere? Pick it here \u2014 or open it in your Recorder or Files app, ' +
+      'tap <strong>Share</strong> and choose Scribe.';
   }
   renderEngineHint();
   renderLive(); renderNotes(); renderSaved(); renderBacklog();

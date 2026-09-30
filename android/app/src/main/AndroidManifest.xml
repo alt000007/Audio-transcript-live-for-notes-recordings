@@ -25,6 +25,29 @@
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
+
+            <!-- Share a recording straight into Scribe from the Recorder app,
+                 Files, or anywhere else. Without these the app simply does not
+                 appear in the share sheet, which is the first thing anyone
+                 tries. The type list is broad on purpose: recorders label
+                 their output inconsistently, and an m4a is commonly announced
+                 as video/mp4 or as a plain byte stream. -->
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="audio/*" />
+                <data android:mimeType="application/ogg" />
+                <data android:mimeType="application/octet-stream" />
+                <data android:mimeType="video/mp4" />
+                <data android:mimeType="video/3gpp" />
+            </intent-filter>
+
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:mimeType="audio/*" />
+            </intent-filter>
         </activity>
 
         <!-- The microphone type is what lets Android keep the mic open once the
