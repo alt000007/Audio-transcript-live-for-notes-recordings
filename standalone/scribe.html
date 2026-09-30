@@ -813,12 +813,15 @@ async function transcribe(blob, recent) {
   }
   if (!res.ok) {
     const body = await res.text().catch(() => '');
+    // Groq states how long to wait; honouring it beats a guessed backoff.
+    const stated = res.status === 429 ? retryDelayFrom(body) : null;
     const err = new Error(
-      res.status === 429 ? 'Groq rate limit — retrying.' :
+      res.status === 429 ? `Groq rate limit — retrying in ${humanWait(stated ?? 8000)}.` :
       res.status === 401 ? 'Groq rejected the API key. Check it under Settings.' :
       res.status === 413 ? 'That segment was too large to transcribe.' :
       `Transcription failed (${res.status}). ${readableError(body)}`);
     err.retryable = res.status === 429 || res.status >= 500;
+    err.retryAfterMs = stated ?? undefined;
     throw err;
   }
   return tidyTranscript((await res.json()).text);
@@ -908,19 +911,86 @@ const CHUNK_SECONDS = 240;
 const TARGET_RATE = 16000;
 
 /** Whisper's own segment timings, so imported notes anchor as well as live ones. */
-async function transcribeFileVerbose(blob, filename, offsetMs, prompt) {
-  const fd = new FormData();
-  fd.append('file', blob, filename);
-  fd.append('model', 'whisper-large-v3-turbo');
-  fd.append('response_format', 'verbose_json');
-  fd.append('temperature', '0');
-  if (settings.lang) fd.append('language', settings.lang);
-  if (prompt) fd.append('prompt', prompt);
+/**
+ * How long Groq says to wait, taken from the body of a 429.
+ *
+ * The retry-after header is not exposed to a page by CORS, but the message is
+ * readable and carries the same figure — "Please try again in 1m23.456s".
+ */
+function retryDelayFrom(body) {
+  const m = /try again in\s+(?:(\d+)m)?([\d.]+)s/i.exec(body || '');
+  if (!m) return null;
+  return Math.ceil(((Number(m[1]) || 0) * 60 + Number(m[2])) * 1000) + 750;
+}
+
+/** Thrown when the account's quota is gone for long enough that waiting it
+ *  out in the app makes no sense. Aborts the rest of a batch. */
+class QuotaExhausted extends Error {
+  constructor(waitMs) {
+    super('quota');
+    this.waitMs = waitMs;
+  }
+}
+
+/** Longer than this and we stop rather than sit there for an hour. */
+const MAX_RATE_WAIT_MS = 5 * 60 * 1000;
+
+function humanWait(ms) {
+  const s = Math.ceil(ms / 1000);
+  if (s < 90) return `${s}s`;
+  const m = Math.round(s / 60);
+  return m < 90 ? `${m} min` : `${(m / 60).toFixed(1)} hours`;
+}
+
+/**
+ * Runs a request, waiting out rate limits rather than failing on them.
+ *
+ * The free tier limits requests per minute and audio-seconds per minute, hour
+ * and day, so a batch of lectures will hit one of them; that is normal and
+ * worth waiting through, not an error. A wait longer than a few minutes means
+ * the longer-period quota is gone, and no amount of retrying inside the app
+ * will change that.
+ */
+async function withRateLimitRetry(attempt, onWait) {
+  for (let tries = 0; ; tries++) {
+    const res = await attempt();
+    if (res.status !== 429) return res;
+
+    const body = await res.text().catch(() => '');
+    const wait = retryDelayFrom(body) ?? Math.min(30000, 2000 * 2 ** tries);
+    if (wait > MAX_RATE_WAIT_MS) throw new QuotaExhausted(wait);
+    if (tries >= 6) throw new QuotaExhausted(wait);
+
+    // Count down rather than looking frozen: these waits reach minutes.
+    const until = Date.now() + wait;
+    while (Date.now() < until) {
+      onWait?.(`Rate limit reached — waiting ${humanWait(until - Date.now())}`);
+      await new Promise((r) => setTimeout(r, Math.min(1000, until - Date.now())));
+    }
+  }
+}
+
+async function transcribeFileVerbose(blob, filename, offsetMs, prompt, onWait) {
+  const rebuild = () => {
+    const fd = new FormData();
+    fd.append('file', blob, filename);
+    fd.append('model', 'whisper-large-v3-turbo');
+    fd.append('response_format', 'verbose_json');
+    fd.append('temperature', '0');
+    if (settings.lang) fd.append('language', settings.lang);
+    if (prompt) fd.append('prompt', prompt);
+    return fd;
+  };
 
   let res;
   try {
-    res = await groq('audio/transcriptions', { method: 'POST', body: fd });
-  } catch {
+    res = await withRateLimitRetry(
+      // The body is consumed on each attempt, so rebuild it every time.
+      () => groq('audio/transcriptions', { method: 'POST', body: rebuild() }),
+      onWait,
+    );
+  } catch (e) {
+    if (e instanceof QuotaExhausted) throw e;
     throw new Error(navigator.onLine
       ? 'The browser blocked the call to Groq, so this file could not be transcribed.'
       : 'You are offline. Reconnect and try the import again.');
@@ -987,7 +1057,7 @@ async function importRecording(file, onProgress) {
 
   if (file.size <= MAX_UPLOAD) {
     onProgress('Transcribing…');
-    const rows = await transcribeFileVerbose(file, file.name, 0, prompt);
+    const rows = await transcribeFileVerbose(file, file.name, 0, prompt, onProgress);
     push(rows);
     session.durationMs = rows.length ? rows[rows.length - 1].endMs : 0;
     return;
@@ -1027,7 +1097,7 @@ async function importRecording(file, onProgress) {
   for (let i = 0; i < cuts.length - 1; i++) {
     onProgress(`Transcribing part ${i + 1} of ${cuts.length - 1}…`);
     const slice = mono.subarray(cuts[i], cuts[i + 1]);
-    const rows = await transcribeFileVerbose(encodeWav(slice, TARGET_RATE), `part-${i + 1}.wav`, (cuts[i] / TARGET_RATE) * 1000, prompt);
+    const rows = await transcribeFileVerbose(encodeWav(slice, TARGET_RATE), `part-${i + 1}.wav`, (cuts[i] / TARGET_RATE) * 1000, prompt, onProgress);
     push(rows);
   }
   session.durationMs = (mono.length / TARGET_RATE) * 1000;
@@ -1098,7 +1168,9 @@ async function runOne(s, seg) {
     seg.attempts = (seg.attempts || 0) + 1;
     if (e.retryable && seg.attempts < 5) {
       seg.status = 'pending';
-      await new Promise((r) => setTimeout(r, Math.min(8000, 1000 * 2 ** (seg.attempts - 1))));
+      // A rate limit says how long it needs; only guess when it does not.
+      const wait = e.retryAfterMs ?? Math.min(8000, 1000 * 2 ** (seg.attempts - 1));
+      await new Promise((r) => setTimeout(r, Math.min(wait, MAX_RATE_WAIT_MS)));
     } else {
       seg.status = 'failed'; seg.error = e.message;
     }
@@ -1547,7 +1619,11 @@ async function runImportBatch(items) {
 
   const many = files.length > 1;
   const failures = [];
-  let done = 0;
+  let done = 0, quotaWait = 0, remaining = 0;
+  // An import assigns the visible session before it can fail, so a failure
+  // would otherwise leave an empty one on screen and make the summary think
+  // nothing came through.
+  let lastGood = session;
 
   for (let i = 0; i < files.length; i++) {
     const item = files[i];
@@ -1555,32 +1631,91 @@ async function runImportBatch(items) {
     const progress = (t) => { msg.textContent = label ? `${label} — ${t}` : t; };
     try {
       progress('Reading…');
-      const file = item instanceof File ? item : await fetchPicked(item);
-      await importRecording(file, progress);
+      if (item && item.error) throw new Error(item.error);
+      if (item && Array.isArray(item.parts)) {
+        // The app already cut this one up; the pieces are one recording.
+        await importParts(item.name, item.parts, progress);
+      } else {
+        const file = item instanceof File ? item : await fetchPicked(item);
+        await importRecording(file, progress);
+      }
       saveSession();
+      lastGood = session;
       done++;
       // A batch runs for a while, so let each one appear as it lands rather
       // than leaving the library empty until the end.
       renderSaved();
     } catch (err) {
-      // One bad file must not take the rest of the batch with it.
       const who = item instanceof File ? item.name : (item.name || 'a file');
+      if (err instanceof QuotaExhausted) {
+        // Every remaining file would fail the same way. Say it once.
+        quotaWait = err.waitMs;
+        remaining = files.length - i;
+        break;
+      }
+      // One bad file must not take the rest of the batch with it.
       failures.push(`${who}: ${err.message}`);
     }
     if (item && item.release) { try { window.ScribeNative.releaseImport(item.release); } catch {} }
   }
 
+  if (!doneText()) session = lastGood;   // don't leave a failed, empty one showing
   status.hidden = true;
   for (const id of ['importfile', 'importnative', 'importbrowse']) $(id).disabled = false;
+
+  renderNotesHeader(); renderNotes();
+  if (done && doneText()) show('notes');
 
   if (failures.length) {
     alertBox(done ? 'warn' : 'error',
       `${done} of ${files.length} imported.` +
       `<div class="tiny" style="margin-top:4px">${failures.map(escapeHtml).join('<br>')}</div>`);
+  } else if (!done && !quotaWait) {
+    alertBox('warn', 'Nothing was transcribed. Check the files actually contain speech.');
   }
-  renderNotesHeader(); renderNotes();
-  if (done && doneText()) show('notes');
-  else if (done && !failures.length) alertBox('warn', 'Nothing was transcribed. Check the files actually contain speech.');
+
+  // Last, so it is the message left on screen: it is the one that says what
+  // to do next.
+  if (quotaWait) {
+    alertBox('warn',
+      `<strong>Groq's free allowance is used up.</strong> ${done} of ${files.length} imported; ` +
+      `${remaining} left to do. It frees up in about ${humanWait(quotaWait)} \u2014 ` +
+      `import the rest after that. Nothing already transcribed is lost.`);
+  }
+}
+
+/**
+ * Imports a recording the app already cut into uploadable pieces.
+ *
+ * The pieces are one recording, not several: each carries where it sat in the
+ * original, so the transcript and its topic timestamps line up with the whole
+ * lecture rather than restarting at each cut.
+ */
+async function importParts(name, parts, progress) {
+  if (!settings.key) throw new Error('needs a Groq key — add one under Settings');
+  session = {
+    title: name.replace(/\.[^.]+$/, '') || 'Imported recording',
+    startedAt: Date.now(), durationMs: 0, segments: [], notes: null, engine: 'whisper',
+  };
+  const prompt = buildPrompt('');
+  let last = 0;
+  for (let i = 0; i < parts.length; i++) {
+    const p = parts[i];
+    progress(`part ${i + 1} of ${parts.length}`);
+    const file = await fetchPicked({ url: p.url, name: `part-${i + 1}.m4a` });
+    const rows = await transcribeFileVerbose(file, file.name, p.offsetMs || 0, prompt,
+      (m) => progress(`part ${i + 1} of ${parts.length} \u2014 ${m}`));
+    for (const r of rows) {
+      session.segments.push({
+        index: session.segments.length, startMs: r.startMs, endMs: r.endMs,
+        text: r.text, status: 'done', blob: null, attempts: 0, error: null,
+      });
+      last = Math.max(last, r.endMs);
+    }
+    renderLive(); renderNotesHeader();
+    if (p.release) { try { window.ScribeNative.releaseImport(p.release); } catch {} }
+  }
+  session.durationMs = last;
 }
 
 /** Pulls a file the app copied somewhere the page can read. */
@@ -1607,7 +1742,7 @@ $('importnative').onclick = () => {
 
 /** The app has copied one or more picks somewhere the page can read them. */
 window.__scribeFilesPicked = (items) => {
-  const list = (Array.isArray(items) ? items : []).filter((r) => r && r.url);
+  const list = (Array.isArray(items) ? items : []).filter((r) => r && (r.url || r.parts || r.error));
   if (!list.length) { $('importstatus').hidden = true; return; }
   runImportBatch(list);
 };

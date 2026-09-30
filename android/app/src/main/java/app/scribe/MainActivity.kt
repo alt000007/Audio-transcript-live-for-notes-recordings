@@ -45,6 +45,9 @@ class MainActivity : AppCompatActivity() {
 
     private lateinit var imports: File
 
+    /** Groq refuses audio over 25MB. */
+    private val UPLOAD_LIMIT = 24L * 1024 * 1024
+
     /** Shares that arrived before the page was ready to receive them. */
     private var pendingShare: List<Uri> = emptyList()
     private var pageReady = false
@@ -311,16 +314,37 @@ class MainActivity : AppCompatActivity() {
                     dest.length() > 0
                 }.getOrDefault(false)
 
-                if (ok) {
-                    out.put(
-                        JSONObject()
-                            .put("url", "https://appassets.androidplatform.net/imports/${dest.name}")
-                            .put("name", name)
-                            .put("release", dest.name),
-                    )
-                } else {
+                if (!ok) {
                     dest.delete()
+                    return@forEachIndexed
                 }
+
+                val entry = JSONObject().put("name", name)
+                if (dest.length() > UPLOAD_LIMIT) {
+                    // Too big to send whole. Cut it here rather than in the
+                    // page: the browser has to decode the entire recording to
+                    // do it, which a long lecture will not survive.
+                    val parts = AudioSplitter.split(dest)
+                    dest.delete()
+                    if (parts.isEmpty()) {
+                        out.put(entry.put("error", "This recording could not be split into uploadable pieces."))
+                        return@forEachIndexed
+                    }
+                    val arr = JSONArray()
+                    parts.forEach { part ->
+                        arr.put(
+                            JSONObject()
+                                .put("url", "https://appassets.androidplatform.net/imports/${part.file.name}")
+                                .put("release", part.file.name)
+                                .put("offsetMs", part.startMs),
+                        )
+                    }
+                    entry.put("parts", arr)
+                } else {
+                    entry.put("url", "https://appassets.androidplatform.net/imports/${dest.name}")
+                    entry.put("release", dest.name)
+                }
+                out.put(entry)
             }
 
             runOnUiThread {
