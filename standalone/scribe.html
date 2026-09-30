@@ -166,6 +166,18 @@
         <label for="title">Title</label>
         <input id="title" class="input" placeholder="e.g. Organic chemistry — week 4">
       </div>
+      <div class="field" style="border-top:1px solid var(--border);padding-top:14px">
+        <label for="importfile">Or import a recording</label>
+        <input id="importfile" class="input" type="file" accept="audio/*,.m4a,.mp3,.wav,.aac,.ogg,.webm">
+        <div class="hint">
+          Your phone&rsquo;s own voice recorder keeps running with the screen off and other apps in
+          front &mdash; this page cannot. Record a class there, then bring the file here to
+          transcribe it. Needs a Groq key.
+        </div>
+        <div id="importstatus" class="row small muted" style="margin-top:10px" hidden>
+          <span class="spin"></span><span id="importmsg"></span>
+        </div>
+      </div>
     </div>
 
     <div id="live" style="margin-top:20px"></div>
@@ -297,26 +309,28 @@ function alertBox(kind, html, dismissable = true) {
 }
 
 /* ══════════════ voice activity detection ══════════════
-   Energy-based, with an asymmetric noise floor: it falls fast toward a quiet
-   room and rises over roughly three minutes. A symmetric tracker chases
-   sustained sound upward until speech no longer clears the threshold, which
-   makes the detector go deaf mid-segment for an evenly-paced speaker.
-   Separate onset and release thresholds stop it chattering between syllables. */
-const ONSET_DB = 9, RELEASE_DB = 4.5, DOWN = 0.3, UP = 0.0005, MIN_RMS = 0.0012, FLOOR_CAP = 0.02;
+   Energy-based, deliberately cheap: this runs for the length of a lecture on a
+   phone, so we only need "is someone talking right now" accurately enough to
+   cut segments at pauses.
+
+   The thresholding lives here; the audio measurement that feeds it comes from
+   an AudioWorklet (below), because a browser in the background throttles
+   timers to about one tick a minute. */
+
+const ONSET_DB = 9;      // must exceed the floor by this to start a talk-spurt
+const RELEASE_DB = 4.5;  // ...and fall below this to end one; the gap is hysteresis
+const DOWN = 0.3;        // floor falls fast toward a quiet room
+const UP = 0.0005;       // ...and rises over ~3 minutes, so sustained speech
+                         //    can never drag it up far enough to go deaf
+const MIN_RMS = 0.0012;
+const FLOOR_CAP = 0.02;
+/** Any sound at all, speech or not. Used to decide whether a segment is worth
+ *  keeping when the detector says it heard no speech. */
+const AUDIBLE = 0.006;
 
 class Vad {
-  constructor(ctx, src) {
-    this.an = ctx.createAnalyser();
-    this.an.fftSize = 1024; this.an.smoothingTimeConstant = 0.3;
-    src.connect(this.an);
-    this.buf = new Float32Array(this.an.fftSize);
-    this.floor = 0.004; this.speaking = false;
-  }
-  read() {
-    this.an.getFloatTimeDomainData(this.buf);
-    let sum = 0;
-    for (let i = 0; i < this.buf.length; i++) sum += this.buf[i] * this.buf[i];
-    const rms = Math.sqrt(sum / this.buf.length);
+  constructor() { this.floor = 0.004; this.speaking = false; }
+  push(rms) {
     const a = rms < this.floor ? DOWN : UP;
     this.floor = Math.min(Math.max(this.floor * (1 - a) + rms * a, MIN_RMS), FLOOR_CAP);
     const gate = this.speaking ? RELEASE_DB : ONSET_DB;
@@ -324,17 +338,44 @@ class Vad {
     const db = 20 * Math.log10(Math.max(rms, 1e-6));
     return { level: Math.min(1, Math.max(0, (db + 60) / 60)), speaking: this.speaking };
   }
-  stop() { this.an.disconnect(); }
 }
 
-/* ══════════════ segmenting recorder ══════════════
-   Emits standalone, independently decodable audio files cut at pauses.
+/* Runs on the audio thread, which browsers do not throttle when the page is in
+   the background. It reports the loudness of every ~100ms of audio; the main
+   thread turns that into cut decisions. Driving this from setInterval instead
+   meant that backgrounding the phone stopped the ticks, which stopped the
+   cutting — and, worse, left every segment marked as containing no speech, so
+   the whole recording was thrown away as silence. */
+const METER_WORKLET = `
+class ScribeMeter extends AudioWorkletProcessor {
+  constructor() { super(); this.sum = 0; this.n = 0; }
+  process(inputs) {
+    const ch = inputs[0] && inputs[0][0];
+    if (ch) {
+      let s = 0;
+      for (let i = 0; i < ch.length; i++) s += ch[i] * ch[i];
+      this.sum += s; this.n += ch.length;
+    }
+    if (this.n >= sampleRate * 0.1) {
+      this.port.postMessage({ rms: Math.sqrt(this.sum / this.n), t: currentTime });
+      this.sum = 0; this.n = 0;
+    }
+    return true;
+  }
+}
+registerProcessor('scribe-meter', ScribeMeter);
+`;
 
-   The MediaRecorder is stopped and restarted at every cut rather than using
+/* ══════════════ segmenting recorder ══════════════
+   Records continuously but emits standalone, independently decodable audio
+   files, cut at natural pauses.
+
+   The MediaRecorder is stopped and restarted at each cut rather than using
    `timeslice`: with timeslice only the first chunk carries the container
    header, so later chunks are not valid files and no transcription API can
-   read them. Restarting costs a few milliseconds at each boundary, which is
-   exactly why the boundary is placed during silence. */
+   read them. Restarting costs a few milliseconds per cut, which is exactly
+   why the cut is placed during silence. */
+
 function pickMime() {
   for (const m of ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4;codecs=mp4a.40.2', 'audio/mp4', 'audio/ogg;codecs=opus'])
     if (window.MediaRecorder && MediaRecorder.isTypeSupported(m)) return m;
@@ -344,9 +385,11 @@ function pickMime() {
 class Recorder {
   constructor(onSegment, onMeter, onError) {
     this.onSegment = onSegment; this.onMeter = onMeter; this.onError = onError;
-    this.i = 0; this.segStart = 0; this.silence = 0; this.sawSpeech = false;
+    this.i = 0; this.segStart = 0; this.silence = 0;
+    this.sawSpeech = false; this.peak = 0;
     this.stopping = false; this.paused = false; this.rec = null; this.timer = null;
   }
+
   async start() {
     this.mime = pickMime();
     if (!this.mime) throw new Error('This browser cannot record audio.');
@@ -356,43 +399,99 @@ class Recorder {
     this.ctx = new (window.AudioContext || window.webkitAudioContext)();
     if (this.ctx.state === 'suspended') await this.ctx.resume();
     this.src = this.ctx.createMediaStreamSource(this.stream);
-    this.vad = new Vad(this.ctx, this.src);
-    this.t0 = performance.now(); this.segStart = 0; this.i = 0;
+    this.vad = new Vad();
+
+    await this.attachMeter();
+
+    this.t0 = this.ctx.currentTime;
+    this.segStart = 0; this.i = 0;
     this.stopping = false; this.paused = false;
     this.open();
-    this.timer = setInterval(() => this.tick(), TICK);
     try { this.wake = await navigator.wakeLock?.request('screen'); } catch {}
   }
-  el() { return performance.now() - this.t0; }
+
+  /** Prefers the audio thread, which is not throttled when the page is in the
+   *  background. Falls back to a timer where AudioWorklet is unavailable;
+   *  that still works in the foreground, so `workletActive` lets the UI say
+   *  so rather than silently promising background recording it cannot do. */
+  async attachMeter() {
+    if (this.ctx.audioWorklet) {
+      try {
+        const url = URL.createObjectURL(new Blob([METER_WORKLET], { type: 'text/javascript' }));
+        await this.ctx.audioWorklet.addModule(url);
+        URL.revokeObjectURL(url);
+        this.meter = new AudioWorkletNode(this.ctx, 'scribe-meter');
+        this.src.connect(this.meter);
+        // A node is only pulled if it reaches the destination, so route it
+        // through a silent gain instead of playing the microphone back.
+        this.mute = this.ctx.createGain();
+        this.mute.gain.value = 0;
+        this.meter.connect(this.mute).connect(this.ctx.destination);
+        this.meter.port.onmessage = (e) => this.tick(e.data.rms);
+        this.workletActive = true;
+        return;
+      } catch { /* fall through to the timer */ }
+    }
+    this.workletActive = false;
+    this.analyser = this.ctx.createAnalyser();
+    this.analyser.fftSize = 1024;
+    this.analyser.smoothingTimeConstant = 0.3;
+    this.src.connect(this.analyser);
+    const buf = new Float32Array(this.analyser.fftSize);
+    this.timer = setInterval(() => {
+      this.analyser.getFloatTimeDomainData(buf);
+      let sum = 0;
+      for (let i = 0; i < buf.length; i++) sum += buf[i] * buf[i];
+      this.tick(Math.sqrt(sum / buf.length));
+    }, TICK);
+  }
+
+  /** Milliseconds since recording began, read from the audio clock — which
+   *  keeps time whether or not the page is being painted. */
+  el() {
+    return this.ctx && this.t0 != null ? (this.ctx.currentTime - this.t0) * 1000 : (this.lastMs || 0);
+  }
+
   open() {
     if (!this.stream) return;
-    const chunks = [], start = this.segStart, idx = this.i++;
+    const chunks = [], start = this.segStart, index = this.i++;
     const r = new MediaRecorder(this.stream, { mimeType: this.mime, audioBitsPerSecond: BITRATE });
     r.ondataavailable = (e) => { if (e.data && e.data.size) chunks.push(e.data); };
     r.onerror = () => this.onError(new Error('Recording failed — the microphone may have been disconnected.'));
     r.onstop = () => {
       const end = this.el(), blob = new Blob(chunks, { type: this.mime });
-      // A segment with no detected speech is room tone. Sending it wastes quota
-      // and reliably produces hallucinated filler like "Thank you."
-      if (this.sawSpeech && blob.size > 2000) this.onSegment({ index: idx, startMs: start, endMs: end, blob });
-      this.sawSpeech = false; this.silence = 0;
+      // Dropping silence saves quota and stops Whisper inventing filler. But
+      // "no speech detected" is not "no sound": if anything was audible, keep
+      // it. Losing part of a lecture is far worse than one wasted call.
+      if ((this.sawSpeech || this.peak > AUDIBLE) && blob.size > 2000) {
+        this.onSegment({ index, startMs: start, endMs: end, blob });
+      }
+      this.sawSpeech = false; this.silence = 0; this.peak = 0;
       if (!this.stopping && !this.paused) { this.segStart = end; this.open(); }
     };
-    this.rec = r; this.sawSpeech = false; this.silence = 0;
+    this.rec = r;
+    this.sawSpeech = false; this.silence = 0; this.peak = 0;
     r.start();
   }
-  tick() {
-    if (!this.vad || this.paused) return;
-    const { level, speaking } = this.vad.read();
+
+  tick(rms) {
+    if (this.paused || !this.vad) return;
+    const { level, speaking } = this.vad.push(rms);
+    this.peak = Math.max(this.peak, rms);
+    this.lastMs = this.el();
     this.onMeter(level, speaking);
+
     if (speaking) { this.sawSpeech = true; this.silence = 0; } else { this.silence += TICK; }
-    const dur = this.el() - this.segStart;
+
+    const dur = this.lastMs - this.segStart;
     const atPause = this.sawSpeech && dur >= MIN_SEG && this.silence >= SILENCE_HOLD;
     const atCap = dur >= settings.maxSeg;
     if ((atPause || atCap) && this.rec?.state === 'recording') this.rec.stop();
   }
+
   pause() { this.paused = true; if (this.rec?.state === 'recording') this.rec.stop(); }
   resume() { if (!this.paused) return; this.paused = false; this.segStart = this.el(); this.open(); }
+
   async stop() {
     this.stopping = true;
     clearInterval(this.timer); this.timer = null;
@@ -401,11 +500,15 @@ class Recorder {
       this.rec.addEventListener('stop', res, { once: true });
       this.rec.stop();
     });
-    this.vad?.stop(); this.src?.disconnect();
+    if (this.meter) { this.meter.port.onmessage = null; this.meter.disconnect(); }
+    this.mute?.disconnect();
+    this.analyser?.disconnect();
+    this.src?.disconnect();
     await this.ctx?.close().catch(() => {});
     this.stream?.getTracks().forEach((t) => t.stop());
     this.wake?.release().catch(() => {});
-    this.stream = this.ctx = this.src = this.vad = this.rec = this.wake = null;
+    this.stream = this.ctx = this.src = this.vad = this.rec = null;
+    this.meter = this.mute = this.analyser = this.wake = null;
   }
 }
 
@@ -512,17 +615,30 @@ class Meter {
     this.ctx = new (window.AudioContext || window.webkitAudioContext)();
     if (this.ctx.state === 'suspended') await this.ctx.resume();
     this.src = this.ctx.createMediaStreamSource(this.stream);
-    this.vad = new Vad(this.ctx, this.src);
-    this.timer = setInterval(() => { const r = this.vad.read(); onMeter(r.level, r.speaking); }, TICK);
+    this.vad = new Vad();
+    // A plain timer is fine here: this only drives the on-screen level bar, and
+    // there is no screen to drive when the page is in the background.
+    this.analyser = this.ctx.createAnalyser();
+    this.analyser.fftSize = 1024;
+    this.analyser.smoothingTimeConstant = 0.3;
+    this.src.connect(this.analyser);
+    const buf = new Float32Array(this.analyser.fftSize);
+    this.timer = setInterval(() => {
+      this.analyser.getFloatTimeDomainData(buf);
+      let sum = 0;
+      for (let i = 0; i < buf.length; i++) sum += buf[i] * buf[i];
+      const r = this.vad.push(Math.sqrt(sum / buf.length));
+      onMeter(r.level, r.speaking);
+    }, TICK);
     try { this.wake = await navigator.wakeLock?.request('screen'); } catch {}
   }
   async stop() {
     clearInterval(this.timer);
-    this.vad?.stop(); this.src?.disconnect();
+    this.analyser?.disconnect(); this.src?.disconnect();
     await this.ctx?.close().catch(() => {});
     this.stream?.getTracks().forEach((t) => t.stop());
     this.wake?.release().catch(() => {});
-    this.stream = this.ctx = this.src = this.vad = this.wake = null;
+    this.stream = this.ctx = this.src = this.vad = this.analyser = this.wake = null;
   }
 }
 
@@ -688,6 +804,149 @@ async function structure(chunks) {
       .map((c) => ({ from: String(c.from || '').trim(), to: String(c.to || '').trim() }))
       .filter((c) => c.from && c.to && c.from !== c.to),
   };
+}
+
+/* ══════════════ importing an existing recording ══════════════
+   The web platform will not let a page record while the phone is locked or
+   another app is in front — on iOS the microphone is cut the moment Safari
+   loses focus. Your phone's own voice recorder has no such limit, so the
+   reliable way to capture a lecture from your pocket is to record it there
+   and bring the file here.
+
+   Whisper takes a whole file, so short recordings go up untouched and come
+   back with real timestamps. Only oversized ones are decoded and split. */
+
+/** Groq rejects audio above 25MB; stay under it. */
+const MAX_UPLOAD = 24 * 1024 * 1024;
+/** Chunk length when a file has to be split, chosen so a 16kHz mono WAV of it
+ *  lands comfortably inside the limit. */
+const CHUNK_SECONDS = 240;
+const TARGET_RATE = 16000;
+
+/** Whisper's own segment timings, so imported notes anchor as well as live ones. */
+async function transcribeFileVerbose(blob, filename, offsetMs, prompt) {
+  const fd = new FormData();
+  fd.append('file', blob, filename);
+  fd.append('model', 'whisper-large-v3-turbo');
+  fd.append('response_format', 'verbose_json');
+  fd.append('temperature', '0');
+  if (settings.lang) fd.append('language', settings.lang);
+  if (prompt) fd.append('prompt', prompt);
+
+  let res;
+  try {
+    res = await groq('audio/transcriptions', { method: 'POST', body: fd });
+  } catch {
+    throw new Error(navigator.onLine
+      ? 'The browser blocked the call to Groq, so this file could not be transcribed.'
+      : 'You are offline. Reconnect and try the import again.');
+  }
+  if (!res.ok) {
+    const body = await res.text().catch(() => '');
+    throw new Error(res.status === 413 || res.status === 400
+      ? `Groq rejected the audio (${res.status}). ${readableError(body)}`
+      : `Import failed (${res.status}). ${readableError(body)}`);
+  }
+  const json = await res.json();
+  const segs = Array.isArray(json.segments) ? json.segments : [];
+  if (segs.length) {
+    return segs
+      .map((sg) => ({ startMs: offsetMs + (sg.start || 0) * 1000, endMs: offsetMs + (sg.end || 0) * 1000, text: (sg.text || '').trim() }))
+      .filter((sg) => sg.text && !HALLUCINATED.includes(sg.text.toLowerCase()));
+  }
+  const whole = (json.text || '').trim();
+  return whole ? [{ startMs: offsetMs, endMs: offsetMs, text: whole }] : [];
+}
+
+function encodeWav(channel, rate) {
+  const bytes = channel.length * 2;
+  const buf = new ArrayBuffer(44 + bytes);
+  const view = new DataView(buf);
+  const str = (off, t) => { for (let i = 0; i < t.length; i++) view.setUint8(off + i, t.charCodeAt(i)); };
+  str(0, 'RIFF'); view.setUint32(4, 36 + bytes, true); str(8, 'WAVE');
+  str(12, 'fmt '); view.setUint32(16, 16, true); view.setUint16(20, 1, true); view.setUint16(22, 1, true);
+  view.setUint32(24, rate, true); view.setUint32(28, rate * 2, true); view.setUint16(32, 2, true); view.setUint16(34, 16, true);
+  str(36, 'data'); view.setUint32(40, bytes, true);
+  for (let i = 0; i < channel.length; i++) {
+    const v = Math.max(-1, Math.min(1, channel[i]));
+    view.setInt16(44 + i * 2, v < 0 ? v * 0x8000 : v * 0x7fff, true);
+  }
+  return new Blob([buf], { type: 'audio/wav' });
+}
+
+/** Nudges a cut toward the quietest moment nearby, so a word is not severed. */
+function quietestNear(data, target, searchRadius) {
+  const win = Math.floor(TARGET_RATE * 0.05);
+  let best = target, bestEnergy = Infinity;
+  const from = Math.max(win, target - searchRadius), to = Math.min(data.length - win, target + searchRadius);
+  for (let i = from; i < to; i += win) {
+    let sum = 0;
+    for (let j = i; j < i + win; j++) sum += data[j] * data[j];
+    if (sum < bestEnergy) { bestEnergy = sum; best = i; }
+  }
+  return best;
+}
+
+async function importRecording(file, onProgress) {
+  if (!settings.key) throw new Error('Importing needs a Groq key. Add a free one under Settings — your browser cannot transcribe a file on its own.');
+
+  const title = file.name.replace(/\.[^.]+$/, '') || 'Imported recording';
+  session = { title, startedAt: file.lastModified || Date.now(), durationMs: 0, segments: [], notes: null, engine: 'whisper' };
+  const prompt = buildPrompt('');
+
+  const push = (rows) => {
+    for (const r of rows) {
+      session.segments.push({ index: session.segments.length, startMs: r.startMs, endMs: r.endMs, text: r.text, status: 'done', blob: null, attempts: 0, error: null });
+    }
+    renderLive(); renderNotesHeader();
+  };
+
+  if (file.size <= MAX_UPLOAD) {
+    onProgress('Transcribing…');
+    const rows = await transcribeFileVerbose(file, file.name, 0, prompt);
+    push(rows);
+    session.durationMs = rows.length ? rows[rows.length - 1].endMs : 0;
+    return;
+  }
+
+  // Too large to send whole. Decode, downmix to 16kHz mono, and cut it up.
+  onProgress('Reading the file…');
+  let decoded;
+  try {
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    decoded = await ctx.decodeAudioData(await file.arrayBuffer());
+    await ctx.close().catch(() => {});
+  } catch {
+    throw new Error('This file is too large to send in one piece, and the browser could not decode it to split it up. Record at a lower quality, or split the recording before importing.');
+  }
+
+  onProgress('Preparing the audio…');
+  let mono;
+  try {
+    const off = new OfflineAudioContext(1, Math.ceil(decoded.duration * TARGET_RATE), TARGET_RATE);
+    const src = off.createBufferSource();
+    src.buffer = decoded;
+    src.connect(off.destination);
+    src.start();
+    mono = (await off.startRendering()).getChannelData(0);
+  } catch {
+    throw new Error('The recording is too long for this device to process in one go. Split it into shorter files and import them separately.');
+  }
+
+  const per = CHUNK_SECONDS * TARGET_RATE;
+  const cuts = [0];
+  while (cuts[cuts.length - 1] + per < mono.length) {
+    cuts.push(quietestNear(mono, cuts[cuts.length - 1] + per, Math.floor(TARGET_RATE * 10)));
+  }
+  cuts.push(mono.length);
+
+  for (let i = 0; i < cuts.length - 1; i++) {
+    onProgress(`Transcribing part ${i + 1} of ${cuts.length - 1}…`);
+    const slice = mono.subarray(cuts[i], cuts[i + 1]);
+    const rows = await transcribeFileVerbose(encodeWav(slice, TARGET_RATE), `part-${i + 1}.wav`, (cuts[i] / TARGET_RATE) * 1000, prompt);
+    push(rows);
+  }
+  session.durationMs = (mono.length / TARGET_RATE) * 1000;
 }
 
 /* ══════════════ state ══════════════ */
@@ -998,6 +1257,9 @@ async function teardown() {
 }
 
 async function stopRecording() {
+  // Recompute rather than trusting the display interval: the browser throttles
+  // it in the background, so it can be minutes behind by the time you stop.
+  if (clock) elapsed = Date.now() - clock.t0 - clock.pausedTotal - (clock.paused ? Date.now() - clock.pausedAt : 0);
   session.durationMs = elapsed;
   interim = '';
   await teardown();
@@ -1051,6 +1313,34 @@ $('v-tx').onclick = () => { $('notes-out').hidden = true; $('tx-out').hidden = f
   $('v-notes').setAttribute('aria-pressed', 'false'); $('v-tx').setAttribute('aria-pressed', 'true'); };
 
 $('record').onclick = () => (recordingNow() ? stopRecording() : startRecording());
+
+$('importfile').onchange = async (e) => {
+  const file = e.target.files?.[0];
+  if (!file) return;
+  if (recordingNow()) { alertBox('warn', 'Stop the current recording before importing.'); e.target.value = ''; return; }
+
+  const status = $('importstatus'), msg = $('importmsg');
+  status.hidden = false;
+  $('importfile').disabled = true;
+  const show1 = (t) => { msg.textContent = t; };
+  show1('Starting\u2026');
+  try {
+    await importRecording(file, show1);
+    saveSession();
+    renderNotes();
+    if (doneText()) {
+      show('notes');
+    } else {
+      alertBox('warn', 'That file transcribed to nothing. Check it actually contains speech.');
+    }
+  } catch (err) {
+    alertBox('error', escapeHtml(err.message));
+  } finally {
+    status.hidden = true;
+    $('importfile').disabled = false;
+    e.target.value = '';
+  }
+};
 $('pause').onclick = togglePause;
 
 $('gen').onclick = async () => {
