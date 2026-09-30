@@ -1,7 +1,10 @@
 // Precaches the app shell so Scribe opens without a connection.
-// Note that only same-origin GETs are touched: transcription calls must always
-// go to the network, never to a stale cache.
-const CACHE = 'scribe-v1'
+//
+// The page itself is network-first: a cache-first document means a published
+// fix never reaches anyone who already opened the app, which is exactly the
+// trap v1 fell into. Static assets stay cache-first, and anything
+// cross-origin is passed straight through so transcription never hits a cache.
+const CACHE = 'scribe-v2'
 const ASSETS = ['./', './index.html', './manifest.webmanifest', './icon.svg']
 
 self.addEventListener('install', (e) => {
@@ -19,7 +22,21 @@ self.addEventListener('activate', (e) => {
 self.addEventListener('fetch', (e) => {
   const url = new URL(e.request.url)
   if (e.request.method !== 'GET' || url.origin !== self.location.origin) return
-  e.respondWith(
-    caches.match(e.request).then((hit) => hit || fetch(e.request).catch(() => caches.match('./index.html'))),
-  )
+
+  const isPage = e.request.mode === 'navigate' || e.request.destination === 'document'
+
+  if (isPage) {
+    e.respondWith(
+      fetch(e.request)
+        .then((res) => {
+          const copy = res.clone()
+          caches.open(CACHE).then((c) => c.put('./index.html', copy)).catch(() => {})
+          return res
+        })
+        .catch(() => caches.match('./index.html').then((hit) => hit || caches.match('./'))),
+    )
+    return
+  }
+
+  e.respondWith(caches.match(e.request).then((hit) => hit || fetch(e.request)))
 })

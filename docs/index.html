@@ -254,6 +254,7 @@
       </div>
     </div>
     <div class="card small muted">
+      <div class="tiny faint mono" style="float:right">build 2026-09-30 06:44 UTC</div>
       <strong style="color:var(--text)">What this is.</strong>
       A single-file version of Scribe for trying the pipeline. It keeps one recording at a time
       plus a list of saved transcripts in this browser. The full app adds accounts, cross-device
@@ -427,21 +428,50 @@ class Recorder {
 const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
 
 class SpeechEngine {
-  constructor(onFinal, onInterim, onError) {
-    this.onFinal = onFinal; this.onInterim = onInterim; this.onError = onError;
+  constructor(onFinal, onInterim, onError, onStall) {
+    this.onFinal = onFinal; this.onInterim = onInterim; this.onError = onError; this.onStall = onStall;
     this.running = false; this.paused = false;
+    this.heardAnything = false; this.continuous = true; this.quietTicks = 0;
   }
   start() {
     if (!SR) throw new Error('This browser has no built-in speech recognition. Use Chrome or Edge, or add a Groq key in Settings.');
     this.running = true;
+    this.heardAnything = false; this.continuous = true; this.quietTicks = 0;
     this.spin();
+    // Recognition can fail by simply never calling back — no error, no result.
+    // Without this the app sits on "Listening" forever and the user is left
+    // to guess, which is exactly what happened in the field.
+    this.watchdog = setInterval(() => this.checkProgress(), 1000);
+  }
+  checkProgress() {
+    if (this.heardAnything || this.paused || !this.running) return;
+    this.quietTicks++;
+
+    // iOS Safari accepts `continuous = true` and then quietly returns nothing.
+    // Single-phrase mode is what it actually implements; the onend handler
+    // already restarts us, so this costs nothing on browsers that were fine.
+    if (this.quietTicks === 7 && this.continuous) {
+      this.continuous = false;
+      this.restart();
+      return;
+    }
+    if (this.quietTicks === 16) {
+      this.onStall();
+    }
+  }
+  restart() {
+    try { this.rec?.abort?.() ?? this.rec?.stop?.(); } catch {}
+    // onend respins with the new settings; guard against it not firing.
+    setTimeout(() => { if (this.running && !this.paused && this.rec?.__gen !== this.__gen) this.spin(); }, 300);
   }
   spin() {
     const r = new SR();
-    r.continuous = true;
+    r.__gen = (this.__gen = (this.__gen || 0) + 1);
+    r.continuous = this.continuous;
     r.interimResults = true;
     if (settings.lang) r.lang = settings.lang;
     r.onresult = (e) => {
+      this.heardAnything = true;
       let interim = '';
       for (let i = e.resultIndex; i < e.results.length; i++) {
         const text = e.results[i][0].transcript;
@@ -477,7 +507,7 @@ class SpeechEngine {
   }
   pause() { this.paused = true; try { this.rec?.stop(); } catch {} }
   resume() { if (!this.paused) return; this.paused = false; this.spin(); }
-  stop() { this.running = false; try { this.rec?.stop(); } catch {} this.rec = null; }
+  stop() { this.running = false; clearInterval(this.watchdog); try { this.rec?.stop(); } catch {} this.rec = null; }
 }
 
 /* Opens the microphone purely to drive the level meter, for the speech-engine
@@ -638,6 +668,7 @@ async function structure(chunks) {
 /* ══════════════ state ══════════════ */
 let session = null;   // { title, startedAt, durationMs, segments: [], notes }
 let noKeyBanner = null;
+let stallBanner = null;
 let rec = null, speech = null, meter = null, interim = '';
 let elapsed = 0, tickTimer = null, queueRunning = false;
 
@@ -704,12 +735,24 @@ function renderLive() {
   renderTranscriptTab();
 }
 
+/** Shown when a recording finished but produced no words. Saying "no
+ *  transcript" alone sends people hunting for a bug in the wrong place. */
+function emptyTranscriptHtml() {
+  if (!session) return '<div class="empty"><h3>No transcript</h3><p>Record something on the Record tab.</p></div>';
+  const viaBrowser = (session.engine || activeEngine()) === 'webspeech';
+  return `<div class="empty"><h3>This recording produced no text</h3><p>${
+    viaBrowser
+      ? 'The microphone worked, but your browser\u2019s speech recognition returned nothing. iPhone Safari does this often. Adding a free Groq key under Settings switches to Whisper, which works on every browser.'
+      : 'Whisper returned nothing for this recording. Check the microphone level, and that the right input is selected.'
+  }</p></div>`;
+}
+
 function renderTranscriptTab() {
   const segs = session ? session.segments.filter((s) => s.status === 'done') : [];
   $('tx-out').innerHTML = segs.length
     ? '<div class="transcript">' + segs.map((s) =>
         `<div class="tline"><span class="ts">${fmt(s.startMs)}</span><span class="tx grow">${escapeHtml(s.text)}</span></div>`).join('') + '</div>'
-    : '<div class="empty"><h3>No transcript</h3><p>Record something on the Record tab.</p></div>';
+    : emptyTranscriptHtml();
 }
 
 function renderNotesHeader() {
@@ -732,7 +775,11 @@ function renderNotesHeader() {
 function renderNotes() {
   const host = $('notes-out');
   if (!session?.notes) {
-    host.innerHTML = '<div class="empty"><h3>No notes yet</h3><p>Record something, then press Generate notes. The raw transcript always stays untouched underneath.</p></div>';
+    // With no transcript there is nothing to make notes from, so say that
+    // rather than inviting the user to press a button that cannot work.
+    host.innerHTML = session && !doneText()
+      ? emptyTranscriptHtml()
+      : '<div class="empty"><h3>No notes yet</h3><p>Press Generate notes to group this recording into topics. The raw transcript always stays untouched underneath.</p></div>';
     return;
   }
   const n = session.notes;
@@ -856,6 +903,7 @@ async function startRecording() {
         (text) => {
           if (!text) return;
           interim = '';
+          if (stallBanner) { stallBanner.remove(); stallBanner = null; }
           session.segments.push({ index: session.segments.length, startMs: elapsed, endMs: elapsed, text, status: 'done', blob: null });
           renderLive(); renderNotesHeader();
         },
@@ -868,6 +916,14 @@ async function startRecording() {
           // startRecording has finished putting the UI into its recording
           // state — tearing down first would then be undone.
           if (fatal) setTimeout(() => { if (recordingNow()) stopRecording(); }, 0);
+        },
+        () => {
+          if (stallBanner) return;
+          stallBanner = alertBox('warn',
+            'Your browser has been listening for a while but has returned no words. ' +
+            'Some browsers — iPhone Safari especially — accept the microphone and then ' +
+            'silently transcribe nothing. The recording is still running, but it may produce no text. ' +
+            '<strong>Add a free Groq key under Settings</strong> to use Whisper instead, which works everywhere.');
         },
       );
       speech.start();
