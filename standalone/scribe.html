@@ -1,0 +1,847 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Scribe</title>
+<style>
+  :root {
+    --bg: #f7f9fc; --surface: #fff; --surface-2: #eef2f8; --border: #dde4ee;
+    --text: #101822; --muted: #566579; --faint: #8493a6;
+    --accent: #0b6bd3; --accent-soft: #e3edfb;
+    --live: #d93a3a; --ok: #12875a; --warn: #a96a00;
+    --radius: 14px; --radius-sm: 9px;
+    --mono: ui-monospace, SFMono-Regular, Menlo, monospace;
+    color-scheme: light;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #0b0f14; --surface: #121821; --surface-2: #19212c; --border: #243040;
+      --text: #e7edf5; --muted: #8ea0b8; --faint: #5d6e86;
+      --accent: #4da3ff; --accent-soft: #16304d;
+      --live: #ff5c5c; --ok: #3ddc97; --warn: #ffb020;
+      color-scheme: dark;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #0b0f14; --surface: #121821; --surface-2: #19212c; --border: #243040;
+    --text: #e7edf5; --muted: #8ea0b8; --faint: #5d6e86;
+    --accent: #4da3ff; --accent-soft: #16304d;
+    --live: #ff5c5c; --ok: #3ddc97; --warn: #ffb020;
+    color-scheme: dark;
+  }
+
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 16px/1.55 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  button, input, textarea, select { font: inherit; color: inherit; }
+
+  .wrap { max-width: 760px; margin: 0 auto; padding: 0 16px 40px; }
+  header {
+    position: sticky; top: env(safe-area-inset-top, 0px); z-index: 10;
+    background: color-mix(in srgb, var(--bg) 90%, transparent);
+    backdrop-filter: blur(10px); border-bottom: 1px solid var(--border);
+    margin: 0 -16px 18px; padding: 12px 16px;
+    display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+  }
+  header h1 { margin: 0; font-size: 17px; font-weight: 650; letter-spacing: -.01em; flex: 1; min-width: 0; }
+  .tabs { display: inline-flex; padding: 3px; gap: 2px; background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius-sm); }
+  .tabs button { padding: 6px 13px; border: 0; background: transparent; border-radius: 6px; font-size: 13.5px; font-weight: 600; color: var(--muted); cursor: pointer; }
+  .tabs button[aria-pressed="true"] { background: var(--surface); color: var(--text); }
+
+  .card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 16px; }
+  .card + .card { margin-top: 12px; }
+  .stack { display: flex; flex-direction: column; gap: 14px; }
+  .row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  .grow { flex: 1; min-width: 0; }
+  .muted { color: var(--muted); } .faint { color: var(--faint); }
+  .small { font-size: 13.5px; } .tiny { font-size: 12px; }
+  .mono { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+
+  .btn { display: inline-flex; align-items: center; justify-content: center; gap: 7px;
+    padding: 10px 16px; border-radius: var(--radius-sm); border: 1px solid var(--border);
+    background: var(--surface-2); font-weight: 600; font-size: 14.5px; cursor: pointer; }
+  .btn:hover:not(:disabled) { filter: brightness(1.06); }
+  .btn:disabled { opacity: .45; cursor: not-allowed; }
+  .btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .btn.danger { color: var(--live); }
+  .btn.sm { padding: 6px 11px; font-size: 13px; }
+  .btn:focus-visible, .tabs button:focus-visible, input:focus-visible, textarea:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+  .input, .textarea { width: 100%; padding: 10px 12px; background: var(--bg);
+    border: 1px solid var(--border); border-radius: var(--radius-sm); outline: none; }
+  .input:focus, .textarea:focus { border-color: var(--accent); }
+  .textarea { resize: vertical; min-height: 78px; font-family: inherit; }
+  .field label { display: block; font-size: 13px; font-weight: 650; margin-bottom: 5px; }
+  .hint { font-size: 12.5px; color: var(--faint); margin-top: 5px; line-height: 1.45; }
+
+  .banner { display: flex; gap: 10px; padding: 11px 13px; border-radius: var(--radius-sm);
+    font-size: 13.5px; border: 1px solid; margin-bottom: 14px; }
+  .banner.error { background: color-mix(in srgb, var(--live) 12%, transparent); border-color: color-mix(in srgb, var(--live) 38%, transparent); }
+  .banner.warn  { background: color-mix(in srgb, var(--warn) 13%, transparent); border-color: color-mix(in srgb, var(--warn) 38%, transparent); }
+  .banner.info  { background: var(--accent-soft); border-color: color-mix(in srgb, var(--accent) 35%, transparent); }
+
+  .pill { display: inline-flex; align-items: center; gap: 5px; padding: 3px 9px; border-radius: 99px;
+    font-size: 11.5px; font-weight: 650; background: var(--surface-2); color: var(--muted); }
+  .pill.ok { background: color-mix(in srgb, var(--ok) 15%, transparent); color: var(--ok); }
+  .pill.warn { background: color-mix(in srgb, var(--warn) 16%, transparent); color: var(--warn); }
+
+  .recorder { text-align: center; padding: 18px 8px 6px; }
+  .timer { font-family: var(--mono); font-size: 46px; font-weight: 300; letter-spacing: -.02em; }
+  .meter { height: 5px; background: var(--surface-2); border-radius: 99px; overflow: hidden; margin: 16px auto; max-width: 300px; }
+  .meter > div { height: 100%; width: 0; background: var(--accent); border-radius: 99px; transition: width 90ms linear, background-color .18s ease; }
+  .meter > div.on { background: var(--ok); }
+  .dot { display: inline-block; width: 9px; height: 9px; border-radius: 99px; background: var(--live); animation: pulse 1.6s ease-in-out infinite; }
+  @keyframes pulse { 0%,100% { opacity: 1 } 50% { opacity: .28 } }
+  @media (prefers-reduced-motion: reduce) { .dot { animation: none } }
+  .controls { display: flex; justify-content: center; gap: 10px; margin-top: 16px; }
+  .big { width: 74px; height: 74px; border-radius: 99px; border: 0; background: var(--live); color: #fff;
+    display: grid; place-items: center; cursor: pointer; box-shadow: 0 6px 20px rgba(0,0,0,.25); }
+  .big:disabled { opacity: .5; cursor: not-allowed; }
+  .big svg { width: 29px; height: 29px; }
+
+  .transcript { display: flex; flex-direction: column; font-size: 15.5px; line-height: 1.7; }
+  .tline { display: flex; gap: 12px; padding: 5px 0; }
+  .tline .ts { flex: 0 0 46px; font-family: var(--mono); font-size: 11.5px; color: var(--faint); padding-top: 5px; }
+  .tline.pending .tx { color: var(--faint); font-style: italic; }
+  .tline.failed .tx { color: var(--live); font-size: 13.5px; }
+
+  .topic { border-left: 2px solid var(--border); padding-left: 14px; margin-bottom: 20px; }
+  .topic h3 { margin: 0 0 2px; font-size: 16px; letter-spacing: -.01em; }
+  .topic ul { margin: 8px 0 0; padding-left: 19px; }
+  .topic li { margin-bottom: 6px; }
+
+  .empty { text-align: center; padding: 48px 20px; color: var(--faint); }
+  .empty h3 { color: var(--text); margin: 0 0 6px; font-size: 16px; }
+  .empty p { margin: 0 auto; max-width: 340px; font-size: 14px; }
+
+  .spin { width: 15px; height: 15px; border: 2px solid var(--border); border-top-color: var(--accent);
+    border-radius: 99px; animation: spin .7s linear infinite; flex: none; }
+  @keyframes spin { to { transform: rotate(360deg) } }
+
+  .sess { display: flex; gap: 10px; align-items: center; padding: 11px 0; border-bottom: 1px solid var(--border); }
+  .sess:last-child { border-bottom: 0; }
+  .sess .t { font-weight: 600; font-size: 14.5px; }
+  [hidden] { display: none !important; }
+  @media (max-width: 420px) { .timer { font-size: 40px } }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>Scribe</h1>
+    <div class="tabs" role="group" aria-label="View">
+      <button id="tab-rec" aria-pressed="true">Record</button>
+      <button id="tab-notes" aria-pressed="false">Notes</button>
+      <button id="tab-set" aria-pressed="false">Settings</button>
+    </div>
+  </header>
+
+  <div id="alerts"></div>
+
+  <!-- ───────────── Record ───────────── -->
+  <section id="p-rec">
+    <div class="recorder">
+      <div class="row" style="justify-content:center;gap:8px;min-height:22px">
+        <span id="status" class="small faint">Ready</span>
+      </div>
+      <div class="timer" id="timer">0:00</div>
+      <div class="meter" aria-hidden="true"><div id="level"></div></div>
+      <div class="controls">
+        <button class="btn" id="pause" hidden></button>
+        <button class="big" id="record" aria-label="Start recording">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round">
+            <rect x="9" y="2" width="6" height="12" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v4"/>
+          </svg>
+        </button>
+      </div>
+    </div>
+
+    <div class="card stack" id="setup" style="margin-top:18px">
+      <div class="field">
+        <label for="title">Title</label>
+        <input id="title" class="input" placeholder="e.g. Organic chemistry — week 4">
+      </div>
+    </div>
+
+    <div id="live" style="margin-top:20px"></div>
+  </section>
+
+  <!-- ───────────── Notes ───────────── -->
+  <section id="p-notes" hidden>
+    <div class="card">
+      <div class="row">
+        <div class="grow">
+          <div id="n-title" style="font-size:18px;font-weight:650;letter-spacing:-.01em">No recording yet</div>
+          <div id="n-meta" class="tiny faint"></div>
+        </div>
+      </div>
+      <div class="row" style="margin-top:14px">
+        <button class="btn primary" id="gen" disabled>Generate notes</button>
+        <button class="btn" id="copy" disabled>Copy Markdown</button>
+        <button class="btn" id="dl" disabled>Download</button>
+      </div>
+    </div>
+    <div class="tabs" style="margin:16px 0 12px" role="group" aria-label="Notes or transcript">
+      <button id="v-notes" aria-pressed="true">Notes</button>
+      <button id="v-tx" aria-pressed="false">Transcript</button>
+    </div>
+    <div id="notes-out"></div>
+    <div id="tx-out" hidden></div>
+
+    <div class="card" id="saved-card" style="margin-top:22px" hidden>
+      <div class="tiny faint" style="text-transform:uppercase;letter-spacing:.06em;margin-bottom:6px">Saved on this device</div>
+      <div id="saved"></div>
+    </div>
+  </section>
+
+  <!-- ───────────── Settings ───────────── -->
+  <section id="p-set" hidden>
+    <div class="card stack">
+      <div class="field">
+        <label for="key">Groq API key</label>
+        <input id="key" class="input" type="password" autocomplete="off" placeholder="gsk_…">
+        <div class="hint">
+          Free at <strong>console.groq.com</strong> — no card needed. Stored in this browser only.
+          It runs <span class="mono">whisper-large-v3-turbo</span> for transcription and
+          <span class="mono">llama-3.3-70b</span> for the notes pass.
+        </div>
+      </div>
+      <div class="field">
+        <label for="lang">Language</label>
+        <select id="lang" class="input">
+          <option value="">Detect automatically</option>
+          <option value="en">English</option><option value="pt">Portuguese</option>
+          <option value="es">Spanish</option><option value="fr">French</option>
+          <option value="de">German</option><option value="it">Italian</option>
+          <option value="nl">Dutch</option><option value="pl">Polish</option>
+          <option value="ja">Japanese</option><option value="zh">Chinese</option>
+        </select>
+        <div class="hint">Naming the language beats autodetect on short, noisy segments.</div>
+      </div>
+      <div class="field">
+        <label for="glossary">Glossary</label>
+        <textarea id="glossary" class="textarea" placeholder="Krebs cycle&#10;mitochondrial matrix&#10;Dr. Okonkwo"></textarea>
+        <div class="hint">
+          One per line. These are fed to Whisper <em>while it decodes</em>, not used to find-and-replace
+          afterwards — steering the recogniser before it commits fixes far more than repairing its output.
+        </div>
+      </div>
+      <div class="field">
+        <label for="maxseg">Longest segment — <span id="maxseg-v">12</span>s</label>
+        <input id="maxseg" type="range" min="8000" max="30000" step="1000" value="12000" style="width:100%">
+        <div class="hint">Audio is cut at natural pauses; this is the cap for speakers who never pause.</div>
+      </div>
+    </div>
+    <div class="card small muted">
+      <strong style="color:var(--text)">What this is.</strong>
+      A single-file version of Scribe for trying the pipeline. It keeps one recording at a time
+      plus a list of saved transcripts in this browser. The full app adds accounts, cross-device
+      sync and a proper library.
+    </div>
+  </section>
+</div>
+
+<script>
+'use strict';
+
+/* ══════════════ storage ══════════════ */
+const LS = {
+  get(k, d) { try { const v = localStorage.getItem('scribe.' + k); return v === null ? d : JSON.parse(v); } catch { return d; } },
+  set(k, v) { try { localStorage.setItem('scribe.' + k, JSON.stringify(v)); } catch {} },
+};
+
+const settings = {
+  key: LS.get('key', ''),
+  lang: LS.get('lang', ''),
+  glossary: LS.get('glossary', ''),
+  maxSeg: LS.get('maxSeg', 12000),
+};
+const MIN_SEG = 4000, SILENCE_HOLD = 550, TICK = 100, BITRATE = 20000;
+
+/* ══════════════ helpers ══════════════ */
+const $ = (id) => document.getElementById(id);
+const fmt = (ms) => {
+  const t = Math.floor(ms / 1000), h = Math.floor(t / 3600), m = Math.floor(t % 3600 / 60), s = t % 60;
+  const p = (n) => String(n).padStart(2, '0');
+  return h ? `${h}:${p(m)}:${p(s)}` : `${m}:${p(s)}`;
+};
+function alertBox(kind, html, dismissable = true) {
+  const el = document.createElement('div');
+  el.className = 'banner ' + kind;
+  el.innerHTML = `<div class="grow">${html}</div>`;
+  if (dismissable) {
+    const b = document.createElement('button');
+    b.className = 'btn sm'; b.textContent = '×'; b.setAttribute('aria-label', 'Dismiss');
+    b.onclick = () => el.remove();
+    el.appendChild(b);
+  }
+  $('alerts').appendChild(el);
+  return el;
+}
+
+/* ══════════════ voice activity detection ══════════════
+   Energy-based, with an asymmetric noise floor: it falls fast toward a quiet
+   room and rises over roughly three minutes. A symmetric tracker chases
+   sustained sound upward until speech no longer clears the threshold, which
+   makes the detector go deaf mid-segment for an evenly-paced speaker.
+   Separate onset and release thresholds stop it chattering between syllables. */
+const ONSET_DB = 9, RELEASE_DB = 4.5, DOWN = 0.3, UP = 0.0005, MIN_RMS = 0.0012, FLOOR_CAP = 0.02;
+
+class Vad {
+  constructor(ctx, src) {
+    this.an = ctx.createAnalyser();
+    this.an.fftSize = 1024; this.an.smoothingTimeConstant = 0.3;
+    src.connect(this.an);
+    this.buf = new Float32Array(this.an.fftSize);
+    this.floor = 0.004; this.speaking = false;
+  }
+  read() {
+    this.an.getFloatTimeDomainData(this.buf);
+    let sum = 0;
+    for (let i = 0; i < this.buf.length; i++) sum += this.buf[i] * this.buf[i];
+    const rms = Math.sqrt(sum / this.buf.length);
+    const a = rms < this.floor ? DOWN : UP;
+    this.floor = Math.min(Math.max(this.floor * (1 - a) + rms * a, MIN_RMS), FLOOR_CAP);
+    const gate = this.speaking ? RELEASE_DB : ONSET_DB;
+    this.speaking = rms > Math.max(this.floor * Math.pow(10, gate / 20), MIN_RMS * 2);
+    const db = 20 * Math.log10(Math.max(rms, 1e-6));
+    return { level: Math.min(1, Math.max(0, (db + 60) / 60)), speaking: this.speaking };
+  }
+  stop() { this.an.disconnect(); }
+}
+
+/* ══════════════ segmenting recorder ══════════════
+   Emits standalone, independently decodable audio files cut at pauses.
+
+   The MediaRecorder is stopped and restarted at every cut rather than using
+   `timeslice`: with timeslice only the first chunk carries the container
+   header, so later chunks are not valid files and no transcription API can
+   read them. Restarting costs a few milliseconds at each boundary, which is
+   exactly why the boundary is placed during silence. */
+function pickMime() {
+  for (const m of ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4;codecs=mp4a.40.2', 'audio/mp4', 'audio/ogg;codecs=opus'])
+    if (window.MediaRecorder && MediaRecorder.isTypeSupported(m)) return m;
+  return '';
+}
+
+class Recorder {
+  constructor(onSegment, onMeter, onError) {
+    this.onSegment = onSegment; this.onMeter = onMeter; this.onError = onError;
+    this.i = 0; this.segStart = 0; this.silence = 0; this.sawSpeech = false;
+    this.stopping = false; this.paused = false; this.rec = null; this.timer = null;
+  }
+  async start() {
+    this.mime = pickMime();
+    if (!this.mime) throw new Error('This browser cannot record audio.');
+    this.stream = await navigator.mediaDevices.getUserMedia({
+      audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+    });
+    this.ctx = new (window.AudioContext || window.webkitAudioContext)();
+    if (this.ctx.state === 'suspended') await this.ctx.resume();
+    this.src = this.ctx.createMediaStreamSource(this.stream);
+    this.vad = new Vad(this.ctx, this.src);
+    this.t0 = performance.now(); this.segStart = 0; this.i = 0;
+    this.stopping = false; this.paused = false;
+    this.open();
+    this.timer = setInterval(() => this.tick(), TICK);
+    try { this.wake = await navigator.wakeLock?.request('screen'); } catch {}
+  }
+  el() { return performance.now() - this.t0; }
+  open() {
+    if (!this.stream) return;
+    const chunks = [], start = this.segStart, idx = this.i++;
+    const r = new MediaRecorder(this.stream, { mimeType: this.mime, audioBitsPerSecond: BITRATE });
+    r.ondataavailable = (e) => { if (e.data && e.data.size) chunks.push(e.data); };
+    r.onerror = () => this.onError(new Error('Recording failed — the microphone may have been disconnected.'));
+    r.onstop = () => {
+      const end = this.el(), blob = new Blob(chunks, { type: this.mime });
+      // A segment with no detected speech is room tone. Sending it wastes quota
+      // and reliably produces hallucinated filler like "Thank you."
+      if (this.sawSpeech && blob.size > 2000) this.onSegment({ index: idx, startMs: start, endMs: end, blob });
+      this.sawSpeech = false; this.silence = 0;
+      if (!this.stopping && !this.paused) { this.segStart = end; this.open(); }
+    };
+    this.rec = r; this.sawSpeech = false; this.silence = 0;
+    r.start();
+  }
+  tick() {
+    if (!this.vad || this.paused) return;
+    const { level, speaking } = this.vad.read();
+    this.onMeter(level, speaking);
+    if (speaking) { this.sawSpeech = true; this.silence = 0; } else { this.silence += TICK; }
+    const dur = this.el() - this.segStart;
+    const atPause = this.sawSpeech && dur >= MIN_SEG && this.silence >= SILENCE_HOLD;
+    const atCap = dur >= settings.maxSeg;
+    if ((atPause || atCap) && this.rec?.state === 'recording') this.rec.stop();
+  }
+  pause() { this.paused = true; if (this.rec?.state === 'recording') this.rec.stop(); }
+  resume() { if (!this.paused) return; this.paused = false; this.segStart = this.el(); this.open(); }
+  async stop() {
+    this.stopping = true;
+    clearInterval(this.timer); this.timer = null;
+    await new Promise((res) => {
+      if (!this.rec || this.rec.state === 'inactive') return res();
+      this.rec.addEventListener('stop', res, { once: true });
+      this.rec.stop();
+    });
+    this.vad?.stop(); this.src?.disconnect();
+    await this.ctx?.close().catch(() => {});
+    this.stream?.getTracks().forEach((t) => t.stop());
+    this.wake?.release().catch(() => {});
+    this.stream = this.ctx = this.src = this.vad = this.rec = this.wake = null;
+  }
+}
+
+/* ══════════════ Groq ══════════════ */
+const HALLUCINATED = ['thank you.', 'thanks for watching!', 'you', '.', 'bye.', '[music]', '[silence]', '[blank_audio]'];
+
+/** Prefers the local proxy from serve.mjs; falls back to calling Groq directly
+ *  when the page is opened some other way. */
+let useProxy = true;
+async function groq(path, init) {
+  if (useProxy) {
+    const res = await fetch('/api/groq/' + path, {
+      ...init,
+      headers: { ...(init.headers || {}), 'X-Groq-Key': settings.key },
+    });
+    if (res.status !== 404) return res;
+    useProxy = false; // not served by serve.mjs — go direct
+  }
+  return fetch('https://api.groq.com/openai/v1/' + path, {
+    ...init,
+    headers: { ...(init.headers || {}), Authorization: 'Bearer ' + settings.key },
+  });
+}
+
+function extFor(mime) {
+  if (mime.includes('webm')) return 'webm';
+  if (mime.includes('ogg')) return 'ogg';
+  if (mime.includes('mp4')) return 'm4a';
+  return 'webm';
+}
+
+/** Glossary plus the tail of the transcript, fed to Whisper as a decoding prior. */
+function buildPrompt(recent) {
+  const parts = [];
+  const g = settings.glossary.trim();
+  if (g) parts.push(g.replace(/\s*\n\s*/g, ', '));
+  const tail = recent.trim().slice(-400);
+  if (tail) parts.push(tail);
+  return parts.join(' ').slice(-900);
+}
+
+async function transcribe(blob, recent) {
+  const fd = new FormData();
+  fd.append('file', blob, 'segment.' + extFor(blob.type));
+  fd.append('model', 'whisper-large-v3-turbo');
+  fd.append('response_format', 'json');
+  fd.append('temperature', '0');
+  if (settings.lang) fd.append('language', settings.lang);
+  const p = buildPrompt(recent);
+  if (p) fd.append('prompt', p);
+
+  let res;
+  try {
+    res = await groq('audio/transcriptions', { method: 'POST', body: fd });
+  } catch (e) {
+    const err = new Error('Could not reach Groq. If you opened this file directly, run it with `node serve.mjs` instead — the browser blocks cross-origin calls.');
+    err.retryable = false;
+    throw err;
+  }
+  if (!res.ok) {
+    const body = await res.text().catch(() => '');
+    const err = new Error(res.status === 429 ? 'Groq rate limit — retrying.' :
+      res.status === 401 ? 'Groq rejected the API key. Check it in Settings.' :
+      `Transcription failed (${res.status}). ${body.slice(0, 160)}`);
+    err.retryable = res.status === 429 || res.status >= 500;
+    throw err;
+  }
+  const t = ((await res.json()).text || '').trim();
+  return HALLUCINATED.includes(t.toLowerCase()) ? '' : t;
+}
+
+const SYSTEM = `You clean up automatic speech-recognition output from a lecture or spoken recording and organise it into notes.
+
+HARD RULES — these override everything else:
+- Never add facts, examples, definitions, dates, names or conclusions that are not present in the transcript. If the speaker did not say it, it does not appear.
+- Never fill a gap. If the transcript is garbled beyond repair, keep the readable part and write [unclear] for the rest.
+- Do not answer questions the speaker asked, and do not resolve things they left open.
+- Preserve the speaker's meaning exactly.
+
+WHAT YOU MAY DO:
+- Fix words the recogniser clearly misheard, using surrounding context. Record every such fix in "corrections".
+- Add punctuation, sentence breaks and capitalisation.
+- Remove filler ("um", "uh", false starts, repeated words) and transcription stutter.
+- Group the content into topics in the order they were discussed, with a short heading in the transcript's own language.
+- Write bullets that compress what was actually said.
+
+Each topic carries "startMs", copied from the [t=NNNN] marker nearest the start of that topic's content.
+
+Reply with JSON only:
+{"summary":"2-3 sentences","topics":[{"heading":"...","startMs":0,"bullets":["..."]}],"corrections":[{"from":"...","to":"..."}]}`;
+
+async function structure(chunks) {
+  const body = {
+    model: 'llama-3.3-70b-versatile',
+    temperature: 0.2,
+    response_format: { type: 'json_object' },
+    messages: [
+      { role: 'system', content: SYSTEM },
+      { role: 'user', content: 'Transcript (timestamps in milliseconds):\n\n' +
+        chunks.map((c) => `[t=${Math.round(c.startMs)}] ${c.text}`).join('\n') },
+    ],
+  };
+  const res = await groq('chat/completions', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(`Could not generate notes (${res.status}). ${(await res.text()).slice(0, 160)}`);
+  const content = (await res.json()).choices?.[0]?.message?.content;
+  if (!content) throw new Error('The notes model returned an empty response.');
+  const raw = JSON.parse(content);
+  return {
+    summary: (raw.summary || '').trim(),
+    topics: (raw.topics || [])
+      .map((t) => ({ heading: (t.heading || 'Untitled').trim(), startMs: Number(t.startMs) || 0,
+                     bullets: (t.bullets || []).map(String).filter(Boolean) }))
+      .filter((t) => t.bullets.length)
+      .sort((a, b) => a.startMs - b.startMs),
+    corrections: (raw.corrections || [])
+      .map((c) => ({ from: String(c.from || '').trim(), to: String(c.to || '').trim() }))
+      .filter((c) => c.from && c.to && c.from !== c.to),
+  };
+}
+
+/* ══════════════ state ══════════════ */
+let session = null;   // { title, startedAt, durationMs, segments: [], notes }
+let noKeyBanner = null;
+let rec = null, elapsed = 0, tickTimer = null, queueRunning = false;
+
+function doneText() {
+  return session.segments.filter((s) => s.status === 'done').map((s) => s.text).join(' ');
+}
+function timedChunks() {
+  return session.segments.filter((s) => s.status === 'done' && s.text).map((s) => ({ startMs: s.startMs, text: s.text }));
+}
+
+/* Drains pending segments one at a time, with backoff. Sequential on purpose:
+   the free tier rate-limits, and ordering keeps the decoding prior meaningful. */
+async function drain() {
+  if (queueRunning) return;
+  queueRunning = true;
+  try {
+    for (;;) {
+      const seg = session?.segments.find((s) => s.status === 'pending');
+      if (!seg) break;
+      if (!settings.key) { seg.status = 'failed'; seg.error = 'No API key — add one in Settings.'; renderLive(); continue; }
+      seg.status = 'working'; renderLive();
+      try {
+        const recent = session.segments.filter((s) => s.index < seg.index && s.status === 'done').slice(-3).map((s) => s.text).join(' ');
+        seg.text = await transcribe(seg.blob, recent);
+        seg.status = seg.text ? 'done' : 'skipped';
+        seg.blob = null;   // audio has served its purpose
+        seg.error = null;
+      } catch (e) {
+        seg.attempts = (seg.attempts || 0) + 1;
+        if (e.retryable && seg.attempts < 5) {
+          seg.status = 'pending';
+          await new Promise((r) => setTimeout(r, Math.min(8000, 1000 * 2 ** (seg.attempts - 1))));
+        } else {
+          seg.status = 'failed'; seg.error = e.message;
+        }
+      }
+      renderLive(); renderNotesHeader();
+    }
+  } finally { queueRunning = false; }
+}
+
+/* ══════════════ rendering ══════════════ */
+function renderLive() {
+  const host = $('live');
+  const segs = session ? session.segments.filter((s) => s.status !== 'skipped') : [];
+  if (!segs.length) {
+    host.innerHTML = session
+      ? '<p class="faint small" style="text-align:center;padding:26px 0">Listening — text appears after the first pause.</p>'
+      : '';
+    renderTranscriptTab(); return;
+  }
+  host.innerHTML = '<div class="transcript">' + segs.map((s) => {
+    const body = s.status === 'done' ? escapeHtml(s.text)
+      : s.status === 'failed' ? escapeHtml(s.error || 'Could not transcribe this part.')
+      : 'transcribing…';
+    return `<div class="tline ${s.status === 'done' ? '' : s.status === 'failed' ? 'failed' : 'pending'}">
+      <span class="ts">${fmt(s.startMs)}</span><span class="tx grow">${body}</span></div>`;
+  }).join('') + '</div>';
+  if (rec) host.scrollIntoView({ behavior: 'smooth', block: 'end' });
+  renderTranscriptTab();
+}
+
+function renderTranscriptTab() {
+  const segs = session ? session.segments.filter((s) => s.status === 'done') : [];
+  $('tx-out').innerHTML = segs.length
+    ? '<div class="transcript">' + segs.map((s) =>
+        `<div class="tline"><span class="ts">${fmt(s.startMs)}</span><span class="tx grow">${escapeHtml(s.text)}</span></div>`).join('') + '</div>'
+    : '<div class="empty"><h3>No transcript</h3><p>Record something on the Record tab.</p></div>';
+}
+
+function renderNotesHeader() {
+  if (!session) return;
+  const done = session.segments.filter((s) => s.status === 'done');
+  const pending = session.segments.filter((s) => s.status === 'pending' || s.status === 'working').length;
+  const words = done.reduce((n, s) => n + (s.text ? s.text.trim().split(/\s+/).length : 0), 0);
+  $('n-title').textContent = session.title;
+  $('n-meta').innerHTML = `${new Date(session.startedAt).toLocaleString()} · <span class="mono">${fmt(session.durationMs || elapsed)}</span>`
+    + (words ? ` · ${words.toLocaleString()} words` : '')
+    + (pending ? ` · <span class="pill">${pending} transcribing</span>` : '');
+  const ready = done.length > 0 && pending === 0;
+  $('gen').disabled = !ready;
+  $('copy').disabled = !done.length;
+  $('dl').disabled = !done.length;
+  $('gen').textContent = session.notes ? 'Regenerate notes' : 'Generate notes';
+}
+
+function renderNotes() {
+  const host = $('notes-out');
+  if (!session?.notes) {
+    host.innerHTML = '<div class="empty"><h3>No notes yet</h3><p>Record something, then press Generate notes. The raw transcript always stays untouched underneath.</p></div>';
+    return;
+  }
+  const n = session.notes;
+  host.innerHTML =
+    (n.summary ? `<div class="card" style="margin-bottom:18px">
+      <div class="tiny faint" style="text-transform:uppercase;letter-spacing:.06em;margin-bottom:6px">Summary</div>
+      <div>${escapeHtml(n.summary)}</div></div>` : '')
+    + n.topics.map((t) => `<section class="topic"><h3>${escapeHtml(t.heading)}</h3>
+        <div class="tiny faint mono">${fmt(t.startMs)}</div>
+        <ul>${t.bullets.map((b) => `<li>${escapeHtml(b)}</li>`).join('')}</ul></section>`).join('')
+    + (n.corrections.length ? `<details class="card"><summary style="cursor:pointer;font-weight:600;font-size:14px">
+        ${n.corrections.length} term${n.corrections.length === 1 ? '' : 's'} corrected</summary>
+        <p class="tiny faint" style="margin-top:8px">Words the model believes the recogniser misheard. Check these against the raw transcript if something looks wrong.</p>
+        <ul class="small" style="margin-bottom:0">${n.corrections.map((c) =>
+          `<li><span class="faint">“${escapeHtml(c.from)}”</span> → <strong>${escapeHtml(c.to)}</strong></li>`).join('')}</ul></details>` : '');
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+/* ══════════════ export ══════════════ */
+function toMarkdown() {
+  const out = [`# ${session.title}`, '', `*${new Date(session.startedAt).toLocaleString()} · ${fmt(session.durationMs)}*`, ''];
+  if (session.notes) {
+    const n = session.notes;
+    if (n.summary) out.push('## Summary', '', n.summary, '');
+    for (const t of n.topics) {
+      out.push(`## ${t.heading}`, '', `*${fmt(t.startMs)}*`, '');
+      for (const b of t.bullets) out.push(`- ${b}`);
+      out.push('');
+    }
+    if (n.corrections.length) {
+      out.push('## Terms corrected', '');
+      for (const c of n.corrections) out.push(`- "${c.from}" → **${c.to}**`);
+      out.push('');
+    }
+  }
+  const tx = doneText();
+  if (tx) out.push('---', '', '## Full transcript', '', tx, '');
+  return out.join('\n');
+}
+
+/* ══════════════ saved sessions (text only) ══════════════ */
+function saveSession() {
+  if (!session || !doneText()) return;
+  const all = LS.get('sessions', []);
+  const rowIndex = all.findIndex((r) => r.startedAt === session.startedAt);
+  const row = {
+    title: session.title, startedAt: session.startedAt, durationMs: session.durationMs,
+    segments: session.segments.filter((s) => s.status === 'done').map((s) => ({ startMs: s.startMs, text: s.text })),
+    notes: session.notes || null,
+  };
+  if (rowIndex >= 0) all[rowIndex] = row; else all.unshift(row);
+  LS.set('sessions', all.slice(0, 40));
+  renderSaved();
+}
+
+function renderSaved() {
+  const all = LS.get('sessions', []);
+  $('saved-card').hidden = all.length === 0;
+  $('saved').innerHTML = all.map((r, i) => `<div class="sess">
+      <div class="grow"><div class="t">${escapeHtml(r.title)}</div>
+        <div class="tiny faint">${new Date(r.startedAt).toLocaleString()} · <span class="mono">${fmt(r.durationMs)}</span>${r.notes ? ' · <span class="pill ok">Notes</span>' : ''}</div></div>
+      <button class="btn sm" data-open="${i}">Open</button>
+      <button class="btn sm danger" data-del="${i}">Delete</button>
+    </div>`).join('');
+  $('saved').querySelectorAll('[data-open]').forEach((b) => b.onclick = () => {
+    const r = LS.get('sessions', [])[+b.dataset.open];
+    session = { title: r.title, startedAt: r.startedAt, durationMs: r.durationMs, notes: r.notes,
+      segments: r.segments.map((s, i) => ({ ...s, index: i, status: 'done', blob: null })) };
+    renderLive(); renderNotesHeader(); renderNotes(); show('notes');
+  });
+  $('saved').querySelectorAll('[data-del]').forEach((b) => b.onclick = () => {
+    const all2 = LS.get('sessions', []); all2.splice(+b.dataset.del, 1); LS.set('sessions', all2); renderSaved();
+  });
+}
+
+/* ══════════════ recording flow ══════════════ */
+async function startRecording() {
+  if (!settings.key) {
+    alertBox('warn', 'No Groq API key yet — recording will work, but nothing will be transcribed. Add one under <strong>Settings</strong>.');
+  }
+  session = {
+    title: $('title').value.trim() || `Recording — ${new Date().toLocaleString([], { dateStyle: 'short', timeStyle: 'short' })}`,
+    startedAt: Date.now(), durationMs: 0, segments: [], notes: null,
+  };
+  elapsed = 0;
+
+  rec = new Recorder(
+    (seg) => { session.segments.push({ ...seg, text: '', status: 'pending', attempts: 0, error: null }); renderLive(); drain(); },
+    (level, speaking) => { const el = $('level'); el.style.width = Math.round(level * 100) + '%'; el.classList.toggle('on', speaking); },
+    (err) => alertBox('error', escapeHtml(err.message)),
+  );
+
+  try {
+    await rec.start();
+  } catch (e) {
+    rec = null; session = null;
+    const name = e.name;
+    alertBox('error', escapeHtml(
+      name === 'NotAllowedError' ? 'Microphone access was blocked. Allow it in your browser’s site settings and try again.' :
+      name === 'NotFoundError' ? 'No microphone found. Plug one in and try again.' :
+      name === 'NotReadableError' ? 'The microphone is in use by another app. Close it and try again.' :
+      (e.message || 'Could not start recording.')));
+    return;
+  }
+
+  $('status').innerHTML = '<span class="dot"></span> <span class="small muted">Recording</span>';
+  $('record').setAttribute('aria-label', 'Stop recording');
+  $('record').innerHTML = '<svg viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2.5"/></svg>';
+  $('pause').hidden = false; $('pause').textContent = 'Pause';
+  $('setup').hidden = true;
+  const t0 = Date.now();
+  let pausedTotal = 0, pausedAt = 0;
+  tickTimer = setInterval(() => { elapsed = Date.now() - t0 - pausedTotal; $('timer').textContent = fmt(elapsed); }, 250);
+  rec._pauseBook = { get pausedTotal() { return pausedTotal; }, add(ms) { pausedTotal += ms; }, mark() { pausedAt = Date.now(); }, since() { return Date.now() - pausedAt; } };
+  renderLive(); renderNotesHeader();
+  window.onbeforeunload = () => true;
+}
+
+async function stopRecording() {
+  clearInterval(tickTimer); tickTimer = null;
+  session.durationMs = elapsed;
+  await rec.stop();
+  rec = null;
+  window.onbeforeunload = null;
+  $('status').innerHTML = '<span class="small faint">Ready</span>';
+  $('record').setAttribute('aria-label', 'Start recording');
+  $('record').innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><rect x="9" y="2" width="6" height="12" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v4"/></svg>';
+  $('pause').hidden = true;
+  $('setup').hidden = false;
+  $('level').style.width = '0%';
+  renderNotesHeader();
+  await drain();
+  saveSession();
+  show('notes');
+}
+
+/* ══════════════ tabs ══════════════ */
+function show(which) {
+  $('p-rec').hidden = which !== 'rec';
+  $('p-notes').hidden = which !== 'notes';
+  $('p-set').hidden = which !== 'set';
+  $('tab-rec').setAttribute('aria-pressed', which === 'rec');
+  $('tab-notes').setAttribute('aria-pressed', which === 'notes');
+  $('tab-set').setAttribute('aria-pressed', which === 'set');
+}
+
+/* ══════════════ wiring ══════════════ */
+$('tab-rec').onclick = () => show('rec');
+$('tab-notes').onclick = () => { renderNotesHeader(); renderNotes(); show('notes'); };
+$('tab-set').onclick = () => show('set');
+
+$('v-notes').onclick = () => { $('notes-out').hidden = false; $('tx-out').hidden = true;
+  $('v-notes').setAttribute('aria-pressed', 'true'); $('v-tx').setAttribute('aria-pressed', 'false'); };
+$('v-tx').onclick = () => { $('notes-out').hidden = true; $('tx-out').hidden = false;
+  $('v-notes').setAttribute('aria-pressed', 'false'); $('v-tx').setAttribute('aria-pressed', 'true'); };
+
+$('record').onclick = () => (rec ? stopRecording() : startRecording());
+$('pause').onclick = () => {
+  if (!rec) return;
+  const book = rec._pauseBook;
+  if (rec.paused) {
+    book.add(book.since()); rec.resume();
+    $('pause').textContent = 'Pause';
+    $('status').innerHTML = '<span class="dot"></span> <span class="small muted">Recording</span>';
+  } else {
+    book.mark(); rec.pause();
+    $('pause').textContent = 'Resume';
+    $('status').innerHTML = '<span class="pill warn">Paused</span>';
+  }
+};
+
+$('gen').onclick = async () => {
+  const b = $('gen'); b.disabled = true; b.textContent = 'Working…';
+  try {
+    session.notes = await structure(timedChunks());
+    renderNotes(); saveSession();
+    $('v-notes').click();
+  } catch (e) {
+    alertBox('error', escapeHtml(e.message));
+  } finally { renderNotesHeader(); }
+};
+
+$('copy').onclick = async () => {
+  const md = toMarkdown();
+  try {
+    await navigator.clipboard.writeText(md);
+    $('copy').textContent = 'Copied'; setTimeout(() => ($('copy').textContent = 'Copy Markdown'), 1600);
+  } catch {
+    alertBox('info', 'Clipboard blocked by the browser — use Download instead.');
+  }
+};
+
+$('dl').onclick = () => {
+  const name = (session.title.replace(/[^\p{L}\p{N}\s-]/gu, '').trim().replace(/\s+/g, '-').slice(0, 60) || 'recording') + '.md';
+  const url = URL.createObjectURL(new Blob([toMarkdown()], { type: 'text/markdown;charset=utf-8' }));
+  const a = document.createElement('a'); a.href = url; a.download = name; a.click();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+};
+
+$('key').value = settings.key;
+$('key').oninput = (e) => {
+  settings.key = e.target.value.trim();
+  LS.set('key', settings.key);
+  // Clear the "no key yet" prompt as soon as one is entered.
+  if (settings.key && noKeyBanner) { noKeyBanner.remove(); noKeyBanner = null; }
+};
+$('lang').value = settings.lang;
+$('lang').onchange = (e) => { settings.lang = e.target.value; LS.set('lang', settings.lang); };
+$('glossary').value = settings.glossary;
+$('glossary').oninput = (e) => { settings.glossary = e.target.value; LS.set('glossary', settings.glossary); };
+$('maxseg').value = settings.maxSeg;
+$('maxseg-v').textContent = Math.round(settings.maxSeg / 1000);
+$('maxseg').oninput = (e) => { settings.maxSeg = +e.target.value; LS.set('maxSeg', settings.maxSeg);
+  $('maxseg-v').textContent = Math.round(settings.maxSeg / 1000); };
+
+/* ══════════════ boot ══════════════ */
+(function boot() {
+  if (!window.isSecureContext) {
+    alertBox('error',
+      'This page is not on a secure origin, so the browser will refuse the microphone. ' +
+      'Run <span class="mono">node serve.mjs</span> from this folder and open ' +
+      '<span class="mono">http://localhost:8000</span>.', false);
+  }
+  if (!navigator.mediaDevices?.getUserMedia || !window.MediaRecorder) {
+    alertBox('error', 'This browser cannot record audio. Try Chrome, Edge or Safari.', false);
+  }
+  if (!settings.key) {
+    noKeyBanner = alertBox('info', 'Add a free Groq API key under <strong>Settings</strong> to transcribe. Get one at console.groq.com — no card needed.');
+  }
+  renderLive(); renderNotes(); renderSaved();
+})();
+</script>
+</body>
+</html>
