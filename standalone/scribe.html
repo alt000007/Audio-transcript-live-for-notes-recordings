@@ -171,6 +171,8 @@
         <label for="importfile">Or import a recording</label>
         <input id="importfile" class="input" type="file" accept="audio/*,.m4a,.mp3,.wav,.aac,.ogg,.webm">
         <button id="importnative" class="btn block" hidden>Choose a recording</button>
+        <button id="importbrowse" class="btn block" hidden style="margin-top:8px">Browse recordings on this phone</button>
+        <div id="recordinglist" hidden style="margin-top:10px"></div>
         <div class="hint">
           <span id="importhint">Your phone&rsquo;s own voice recorder keeps running with the screen off and other
           apps in front &mdash; this page cannot. Record a class there, then bring the file here to
@@ -1577,6 +1579,51 @@ window.__scribeFilePicked = async (url, name) => {
 };
 
 window.__scribeFileCancelled = () => { $('importstatus').hidden = true; };
+
+/* ── the app's own chooser ──────────────────────────────────────────────
+   Reading the phone's media library and drawing the list here does not
+   depend on the system document picker existing or behaving, which is the
+   part that has been unreliable. */
+
+$('importbrowse').onclick = () => {
+  const host = $('recordinglist');
+  if (!host.hidden) { host.hidden = true; return; }
+  host.hidden = false;
+  host.innerHTML = '<div class="row small muted" style="gap:8px"><span class="spin"></span>Looking for recordings…</div>';
+  try { window.ScribeNative.listRecordings(); }
+  catch { host.innerHTML = '<div class="small">Could not read the phone’s recordings.</div>'; }
+};
+
+window.__scribeNoMediaAccess = () => {
+  $('recordinglist').innerHTML =
+    '<div class="small">Scribe needs permission to read audio on this phone to list your recordings. ' +
+    'Allow it when asked, or grant it under Android Settings › Apps › Scribe › Permissions.</div>';
+};
+
+window.__scribeRecordings = (items) => {
+  const host = $('recordinglist');
+  const list = Array.isArray(items) ? items : [];
+  if (!list.length) {
+    host.innerHTML = '<div class="small">No audio files found on this phone. Record something in your Recorder app first, or use Share from there.</div>';
+    return;
+  }
+  host.innerHTML = '<div class="list">' + list.map((r) => {
+    const mins = r.duration ? fmt(Number(r.duration)) : '';
+    const mb = r.size ? (Number(r.size) / 1048576).toFixed(1) + ' MB' : '';
+    return `<button class="sess" data-rec="${escapeHtml(String(r.id))}" style="width:100%;text-align:left;background:none;border:0;border-bottom:1px solid var(--border);cursor:pointer">
+      <span class="grow"><span class="t">${escapeHtml(r.name || 'recording')}</span>
+      <span class="tiny faint" style="display:block">${[mins, mb].filter(Boolean).join(' · ')}</span></span></button>`;
+  }).join('') + '</div>';
+  host.querySelectorAll('[data-rec]').forEach((el) => {
+    el.onclick = () => {
+      host.hidden = true;
+      $('importstatus').hidden = false;
+      $('importmsg').textContent = 'Opening…';
+      try { window.ScribeNative.openRecording(el.dataset.rec); }
+      catch { $('importstatus').hidden = true; alertBox('error', 'Could not open that recording.'); }
+    };
+  });
+};
 $('pause').onclick = togglePause;
 
 $('gen').onclick = async () => {
@@ -1677,9 +1724,11 @@ $('maxseg').oninput = (e) => { settings.maxSeg = +e.target.value; LS.set('maxSeg
   if (NATIVE) {
     $('importfile').hidden = true;
     $('importnative').hidden = false;
+    $('importbrowse').hidden = false;
     $('importhint').innerHTML =
-      'Already recorded something elsewhere? Pick it here \u2014 or open it in your Recorder or Files app, ' +
-      'tap <strong>Share</strong> and choose Scribe.';
+      'Three ways in, whichever works on your phone: browse the recordings already on it, ' +
+      'use the system picker, or open a file in your Recorder or Files app and tap ' +
+      '<strong>Share \u203a Scribe</strong>.';
   }
   renderEngineHint();
   renderLive(); renderNotes(); renderSaved(); renderBacklog();

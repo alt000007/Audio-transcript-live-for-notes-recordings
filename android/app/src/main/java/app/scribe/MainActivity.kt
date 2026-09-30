@@ -3,11 +3,13 @@ package app.scribe
 import android.Manifest
 import android.annotation.SuppressLint
 import android.content.ActivityNotFoundException
+import android.content.ContentUris
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.provider.MediaStore
 import android.provider.OpenableColumns
 import android.util.Base64
 import android.webkit.JavascriptInterface
@@ -22,6 +24,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 import androidx.webkit.WebViewAssetLoader
+import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
 import kotlin.concurrent.thread
@@ -76,6 +79,15 @@ class MainActivity : AppCompatActivity() {
     }
 
     private val askNotify = registerForActivityResult(ActivityResultContracts.RequestPermission()) { }
+
+    private val mediaPermission
+        get() = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) Manifest.permission.READ_MEDIA_AUDIO
+                else Manifest.permission.READ_EXTERNAL_STORAGE
+
+    private val askMedia = registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        if (granted) emitRecordings()
+        else toJs("window.__scribeNoMediaAccess && window.__scribeNoMediaAccess()")
+    }
 
     @SuppressLint("SetJavaScriptEnabled")
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -281,6 +293,45 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private fun hasMediaAccess() =
+        ContextCompat.checkSelfPermission(this, mediaPermission) == PackageManager.PERMISSION_GRANTED
+
+    /**
+     * Lists the audio already on the phone so the app can show its own
+     * chooser. The system document picker is one component among many on a
+     * given device and can be absent, replaced or simply uncooperative;
+     * reading MediaStore does not depend on any of that.
+     */
+    private fun emitRecordings() {
+        thread(isDaemon = true) {
+            val out = JSONArray()
+            runCatching {
+                val cols = arrayOf(
+                    MediaStore.Audio.Media._ID,
+                    MediaStore.Audio.Media.DISPLAY_NAME,
+                    MediaStore.Audio.Media.SIZE,
+                    MediaStore.Audio.Media.DURATION,
+                )
+                contentResolver.query(
+                    MediaStore.Audio.Media.EXTERNAL_CONTENT_URI,
+                    cols, null, null,
+                    "${MediaStore.Audio.Media.DATE_ADDED} DESC",
+                )?.use { c ->
+                    while (c.moveToNext() && out.length() < 300) {
+                        out.put(
+                            JSONObject()
+                                .put("id", c.getLong(0).toString())
+                                .put("name", c.getString(1) ?: "recording")
+                                .put("size", c.getLong(2))
+                                .put("duration", c.getLong(3)),
+                        )
+                    }
+                }
+            }
+            runOnUiThread { toJs("window.__scribeRecordings && window.__scribeRecordings($out)") }
+        }
+    }
+
     private fun toJs(script: String) {
         runCatching { web.evaluateJavascript(script, null) }
     }
@@ -312,6 +363,23 @@ class MainActivity : AppCompatActivity() {
                 if (!launchPicker()) {
                     toJs("window.__scribeError && window.__scribeError(${json("No app on this phone can pick a file.")})")
                 }
+            }
+        }
+
+        /** Ask for the phone's own list of recordings. */
+        @JavascriptInterface
+        fun listRecordings() {
+            runOnUiThread {
+                if (hasMediaAccess()) emitRecordings() else askMedia.launch(mediaPermission)
+            }
+        }
+
+        /** Import one of the entries from that list. */
+        @JavascriptInterface
+        fun openRecording(id: String) {
+            runOnUiThread {
+                val n = id.toLongOrNull() ?: return@runOnUiThread
+                copyIn(ContentUris.withAppendedId(MediaStore.Audio.Media.EXTERNAL_CONTENT_URI, n))
             }
         }
 
