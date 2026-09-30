@@ -28,8 +28,8 @@ await chmod(join(HERE, 'scribe.mjs'), 0o755)
 // Only this build gets a manifest and a service worker; the local runner
 // serves a single route and would 404 on both.
 const PWA_HEAD = `<link rel="manifest" href="./manifest.webmanifest">
-<link rel="icon" href="./icon-192.png">
-<link rel="apple-touch-icon" href="./icon-192.png">
+<link rel="icon" href="./icon.svg">
+<link rel="apple-touch-icon" href="./icon.svg">
 <meta name="theme-color" content="#0b0f14">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-title" content="Scribe">`
