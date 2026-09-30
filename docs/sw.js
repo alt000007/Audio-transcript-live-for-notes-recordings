@@ -4,7 +4,7 @@
 // fix never reaches anyone who already opened the app, which is exactly the
 // trap v1 fell into. Static assets stay cache-first, and anything
 // cross-origin is passed straight through so transcription never hits a cache.
-const CACHE = 'scribe-v2'
+const CACHE = 'scribe-v3'
 const ASSETS = ['./', './index.html', './manifest.webmanifest', './icon.svg']
 
 self.addEventListener('install', (e) => {

@@ -542,22 +542,40 @@ function activeEngine() {
 /* ══════════════ Groq ══════════════ */
 const HALLUCINATED = ['thank you.', 'thanks for watching!', 'you', '.', 'bye.', '[music]', '[silence]', '[blank_audio]'];
 
-/** Prefers the local proxy from serve.mjs; falls back to calling Groq directly
- *  when the page is opened some other way. */
-let useProxy = true;
+/**
+ * Routes Groq calls through the local proxy when there is one, and straight to
+ * Groq otherwise.
+ *
+ * The local runner sets this flag on the page it serves. Sniffing for the
+ * proxy instead — calling it and treating a 404 as "not there" — was wrong
+ * twice over: the path was absolute, so on a project site it escaped the app's
+ * own subpath entirely, and a static host answers a POST with 405, not 404,
+ * so the sniff returned the host's error page to the caller as if it were a
+ * transcription failure. An explicit flag cannot be wrong about which
+ * environment it is in.
+ */
+const LOCAL_PROXY = window.__SCRIBE_LOCAL_PROXY__ === 1;
+
 async function groq(path, init) {
-  if (useProxy) {
-    const res = await fetch('/api/groq/' + path, {
+  if (LOCAL_PROXY) {
+    return fetch('./api/groq/' + path, {
       ...init,
       headers: { ...(init.headers || {}), 'X-Groq-Key': settings.key },
     });
-    if (res.status !== 404) return res;
-    useProxy = false; // not served by serve.mjs — go direct
   }
   return fetch('https://api.groq.com/openai/v1/' + path, {
     ...init,
     headers: { ...(init.headers || {}), Authorization: 'Bearer ' + settings.key },
   });
+}
+
+/** Error bodies are not always JSON — a proxy or CDN in the way returns HTML.
+ *  Showing raw markup to a user is noise, so reduce it to its text. */
+function readableError(body) {
+  const text = /<\/?[a-z][\s\S]*>/i.test(body)
+    ? body.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim()
+    : body.trim();
+  return text.slice(0, 160);
 }
 
 function extFor(mime) {
@@ -591,15 +609,21 @@ async function transcribe(blob, recent) {
   try {
     res = await groq('audio/transcriptions', { method: 'POST', body: fd });
   } catch (e) {
-    const err = new Error('Could not reach Groq. If you opened this file directly, run it with `node serve.mjs` instead — the browser blocks cross-origin calls.');
-    err.retryable = false;
+    // fetch only rejects on a network-level failure: offline, DNS, or the
+    // browser refusing the cross-origin call outright.
+    const err = new Error(navigator.onLine
+      ? 'The browser blocked the call to Groq. Transcription cannot run from this page; use the browser speech engine under Settings, or run Scribe locally.'
+      : 'You are offline, so this part could not be transcribed. It will retry when you reconnect.');
+    err.retryable = !navigator.onLine;
     throw err;
   }
   if (!res.ok) {
     const body = await res.text().catch(() => '');
-    const err = new Error(res.status === 429 ? 'Groq rate limit — retrying.' :
-      res.status === 401 ? 'Groq rejected the API key. Check it in Settings.' :
-      `Transcription failed (${res.status}). ${body.slice(0, 160)}`);
+    const err = new Error(
+      res.status === 429 ? 'Groq rate limit — retrying.' :
+      res.status === 401 ? 'Groq rejected the API key. Check it under Settings.' :
+      res.status === 413 ? 'That segment was too large to transcribe.' :
+      `Transcription failed (${res.status}). ${readableError(body)}`);
     err.retryable = res.status === 429 || res.status >= 500;
     throw err;
   }
@@ -645,10 +669,17 @@ async function structure(chunks) {
         chunks.map((c) => `[t=${Math.round(c.startMs)}] ${c.text}`).join('\n') },
     ],
   };
-  const res = await groq('chat/completions', {
-    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
-  });
-  if (!res.ok) throw new Error(`Could not generate notes (${res.status}). ${(await res.text()).slice(0, 160)}`);
+  let res;
+  try {
+    res = await groq('chat/completions', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+    });
+  } catch {
+    throw new Error(navigator.onLine
+      ? 'The browser blocked the call to Groq, so notes cannot be generated here. Use Copy notes prompt and paste it into an assistant instead.'
+      : 'You are offline. Reconnect and try again.');
+  }
+  if (!res.ok) throw new Error(`Could not generate notes (${res.status}). ${readableError(await res.text().catch(() => ''))}`);
   const content = (await res.json()).choices?.[0]?.message?.content;
   if (!content) throw new Error('The notes model returned an empty response.');
   const raw = JSON.parse(content);
@@ -739,6 +770,14 @@ function renderLive() {
  *  transcript" alone sends people hunting for a bug in the wrong place. */
 function emptyTranscriptHtml() {
   if (!session) return '<div class="empty"><h3>No transcript</h3><p>Record something on the Record tab.</p></div>';
+
+  // If segments actually failed, their error is the real reason. Guessing at a
+  // cause we already know is worse than saying nothing.
+  const failed = session.segments.find((s) => s.status === 'failed' && s.error);
+  if (failed) {
+    return `<div class="empty"><h3>This recording produced no text</h3><p>${escapeHtml(failed.error)}</p></div>`;
+  }
+
   const viaBrowser = (session.engine || activeEngine()) === 'webspeech';
   return `<div class="empty"><h3>This recording produced no text</h3><p>${
     viaBrowser

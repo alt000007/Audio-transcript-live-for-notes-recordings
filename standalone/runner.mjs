@@ -98,7 +98,12 @@ const server = createServer(async (req, res) => {
   }
 
   if (url.pathname === '/' || url.pathname === '/index.html') {
-    return send(res, 200, HTML, 'text/html; charset=utf-8')
+    // Tell the page it has a proxy in front of it. The same file is also
+    // published as a static site, where there is none and calls must go
+    // straight to Groq — the page cannot reliably tell the two apart by
+    // probing, so it is told outright.
+    const page = HTML.replace('</head>', '<script>window.__SCRIBE_LOCAL_PROXY__=1</script>\n</head>')
+    return send(res, 200, page, 'text/html; charset=utf-8')
   }
   if (url.pathname === '/favicon.ico') {
     res.writeHead(204).end()
