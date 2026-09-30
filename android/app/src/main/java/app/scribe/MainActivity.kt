@@ -333,6 +333,45 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private fun hasMediaAccess() =
+        ContextCompat.checkSelfPermission(this, mediaPermission) == PackageManager.PERMISSION_GRANTED
+
+    /**
+     * Lists the audio already on the phone so the app can show its own
+     * chooser. The system document picker is one component among many on a
+     * given device and can be absent, replaced or simply uncooperative;
+     * reading MediaStore does not depend on any of that.
+     */
+    private fun emitRecordings() {
+        thread(isDaemon = true) {
+            val out = JSONArray()
+            runCatching {
+                val cols = arrayOf(
+                    MediaStore.Audio.Media._ID,
+                    MediaStore.Audio.Media.DISPLAY_NAME,
+                    MediaStore.Audio.Media.SIZE,
+                    MediaStore.Audio.Media.DURATION,
+                )
+                contentResolver.query(
+                    MediaStore.Audio.Media.EXTERNAL_CONTENT_URI,
+                    cols, null, null,
+                    "${MediaStore.Audio.Media.DATE_ADDED} DESC",
+                )?.use { c ->
+                    while (c.moveToNext() && out.length() < 300) {
+                        out.put(
+                            JSONObject()
+                                .put("id", c.getLong(0).toString())
+                                .put("name", c.getString(1) ?: "recording")
+                                .put("size", c.getLong(2))
+                                .put("duration", c.getLong(3)),
+                        )
+                    }
+                }
+            }
+            runOnUiThread { toJs("window.__scribeRecordings && window.__scribeRecordings($out)") }
+        }
+    }
+
     private fun toJs(script: String) {
         runCatching { web.evaluateJavascript(script, null) }
     }
