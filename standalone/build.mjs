@@ -14,7 +14,10 @@ import { fileURLToPath } from 'node:url'
 const HERE = dirname(fileURLToPath(import.meta.url))
 const DOCS = resolve(HERE, '..', 'docs')
 
-const html = await readFile(join(HERE, 'scribe.html'), 'utf8')
+const stamp = new Date().toISOString().slice(0, 16).replace('T', ' ') + ' UTC'
+// Stamped at build time, not written by hand: a hand-written stamp goes stale
+// on the next build and then lies about which version is running.
+const html = (await readFile(join(HERE, 'scribe.html'), 'utf8')).replaceAll('__BUILD_STAMP__', stamp)
 const runner = await readFile(join(HERE, 'runner.mjs'), 'utf8')
 
 // ── 1. the single-file local runner ───────────────────────────────────────
@@ -50,5 +53,6 @@ if (!docs.includes('manifest.webmanifest') || !docs.includes('serviceWorker')) {
 }
 await writeFile(join(DOCS, 'index.html'), docs)
 
+console.log(`build stamp            ${stamp}`)
 console.log(`standalone/scribe.mjs  ${(mjs.length / 1024).toFixed(1)} KB`)
 console.log(`docs/index.html        ${(docs.length / 1024).toFixed(1)} KB`)
