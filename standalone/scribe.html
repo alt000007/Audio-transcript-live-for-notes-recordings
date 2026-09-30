@@ -203,12 +203,22 @@
   <section id="p-set" hidden>
     <div class="card stack">
       <div class="field">
-        <label for="key">Groq API key</label>
+        <label for="engine">Transcription</label>
+        <select id="engine" class="input">
+          <option value="auto">Automatic</option>
+          <option value="webspeech">Browser speech recognition — no key</option>
+          <option value="whisper">Whisper via Groq — needs a key</option>
+        </select>
+        <div class="hint" id="engine-hint"></div>
+      </div>
+      <div class="field">
+        <label for="key">Groq API key <span class="faint" style="font-weight:400">— optional</span></label>
         <input id="key" class="input" type="password" autocomplete="off" placeholder="gsk_…">
         <div class="hint">
-          Free at <strong>console.groq.com</strong> — no card needed. Stored in this browser only.
-          It runs <span class="mono">whisper-large-v3-turbo</span> for transcription and
-          <span class="mono">llama-3.3-70b</span> for the notes pass.
+          Leave this empty and the app uses your browser's own speech recognition, which needs no
+          account. Adding a free key from <strong>console.groq.com</strong> switches to
+          <span class="mono">whisper-large-v3-turbo</span>, which is noticeably more accurate on
+          jargon and accents, and unlocks the AI notes pass. Stored in this browser only.
         </div>
       </div>
       <div class="field">
@@ -256,6 +266,7 @@ const LS = {
 };
 
 const settings = {
+  engine: LS.get('engine', 'auto'),
   key: LS.get('key', ''),
   lang: LS.get('lang', ''),
   glossary: LS.get('glossary', ''),
@@ -397,6 +408,101 @@ class Recorder {
   }
 }
 
+/* ══════════════ browser speech recognition ══════════════
+   Chrome and Edge ship a speech recogniser that costs nothing and needs no
+   account, so it is the default when no Groq key is present. It streams
+   interim words as you speak, which feels more immediate than Whisper's
+   segment-at-a-time.
+
+   Its weaknesses are real and worth knowing: it is Chromium-only, it sends
+   audio to the vendor's servers so it needs a connection, it has no notion of
+   a glossary, and it stops itself after a pause — hence the restart in onend.
+   Whisper is the better engine; this is the one that works with zero setup. */
+const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+
+class SpeechEngine {
+  constructor(onFinal, onInterim, onError) {
+    this.onFinal = onFinal; this.onInterim = onInterim; this.onError = onError;
+    this.running = false; this.paused = false;
+  }
+  start() {
+    if (!SR) throw new Error('This browser has no built-in speech recognition. Use Chrome or Edge, or add a Groq key in Settings.');
+    this.running = true;
+    this.spin();
+  }
+  spin() {
+    const r = new SR();
+    r.continuous = true;
+    r.interimResults = true;
+    if (settings.lang) r.lang = settings.lang;
+    r.onresult = (e) => {
+      let interim = '';
+      for (let i = e.resultIndex; i < e.results.length; i++) {
+        const text = e.results[i][0].transcript;
+        if (e.results[i].isFinal) this.onFinal(text.trim());
+        else interim += text;
+      }
+      this.onInterim(interim.trim());
+    };
+    r.onerror = (e) => {
+      // 'no-speech' and 'aborted' are routine during pauses; everything else matters.
+      if (e.error === 'no-speech' || e.error === 'aborted') return;
+
+      // Some Chromium builds expose the API but ship no speech backend, so it
+      // only fails once you actually record. Detection cannot catch that, so
+      // the error has to carry the remedy.
+      const noBackend = e.error === 'service-not-allowed' || e.error === 'audio-capture';
+      const msg =
+        noBackend ? 'This browser exposes speech recognition but has no working speech service — common in Chromium builds that are not Google Chrome. Add a free Groq key under Settings to use Whisper instead, or open this page in Google Chrome.' :
+        e.error === 'not-allowed' ? 'Microphone access was blocked. Allow it in your browser’s site settings and try again.' :
+        e.error === 'network' ? 'Browser speech recognition needs an internet connection. Reconnect, or add a Groq key to use Whisper.' :
+        e.error === 'language-not-supported' ? 'The browser recogniser does not support that language. Pick another under Settings, or add a Groq key to use Whisper.' :
+        'Speech recognition stopped: ' + e.error;
+
+      const fatal = noBackend || e.error === 'not-allowed' || e.error === 'language-not-supported';
+      if (fatal) this.running = false;   // stop onend from respinning into the same failure
+      this.onError(new Error(msg), fatal);
+    };
+    // Chrome ends the session on its own after a silence. Restart so a lecture
+    // does not quietly stop being transcribed halfway through.
+    r.onend = () => { if (this.running && !this.paused) this.spin(); };
+    this.rec = r;
+    try { r.start(); } catch { /* already starting; onend will respin */ }
+  }
+  pause() { this.paused = true; try { this.rec?.stop(); } catch {} }
+  resume() { if (!this.paused) return; this.paused = false; this.spin(); }
+  stop() { this.running = false; try { this.rec?.stop(); } catch {} this.rec = null; }
+}
+
+/* Opens the microphone purely to drive the level meter, for the speech-engine
+   path where nothing else holds the stream. */
+class Meter {
+  async start(onMeter) {
+    this.stream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1 } });
+    this.ctx = new (window.AudioContext || window.webkitAudioContext)();
+    if (this.ctx.state === 'suspended') await this.ctx.resume();
+    this.src = this.ctx.createMediaStreamSource(this.stream);
+    this.vad = new Vad(this.ctx, this.src);
+    this.timer = setInterval(() => { const r = this.vad.read(); onMeter(r.level, r.speaking); }, TICK);
+    try { this.wake = await navigator.wakeLock?.request('screen'); } catch {}
+  }
+  async stop() {
+    clearInterval(this.timer);
+    this.vad?.stop(); this.src?.disconnect();
+    await this.ctx?.close().catch(() => {});
+    this.stream?.getTracks().forEach((t) => t.stop());
+    this.wake?.release().catch(() => {});
+    this.stream = this.ctx = this.src = this.vad = this.wake = null;
+  }
+}
+
+/** Which engine will actually run, given the setting and what is available. */
+function activeEngine() {
+  if (settings.engine === 'whisper') return 'whisper';
+  if (settings.engine === 'webspeech') return 'webspeech';
+  return settings.key ? 'whisper' : (SR ? 'webspeech' : 'none');
+}
+
 /* ══════════════ Groq ══════════════ */
 const HALLUCINATED = ['thank you.', 'thanks for watching!', 'you', '.', 'bye.', '[music]', '[silence]', '[blank_audio]'];
 
@@ -485,6 +591,13 @@ Each topic carries "startMs", copied from the [t=NNNN] marker nearest the start 
 Reply with JSON only:
 {"summary":"2-3 sentences","topics":[{"heading":"...","startMs":0,"bullets":["..."]}],"corrections":[{"from":"...","to":"..."}]}`;
 
+const NOTES_PROMPT_HEADER =
+  'Below is an automatic transcript of a lecture, with [t=ms] timestamps. ' +
+  'Clean up the transcription and organise it into topic-grouped notes with a short summary. ' +
+  'Fix words the recogniser clearly misheard, add punctuation, and remove filler. ' +
+  'Do not add any fact, example or conclusion that is not in the transcript \u2014 if something is ' +
+  'garbled beyond repair, write [unclear]. List every term you corrected at the end.';
+
 async function structure(chunks) {
   const body = {
     model: 'llama-3.3-70b-versatile',
@@ -519,7 +632,8 @@ async function structure(chunks) {
 /* ══════════════ state ══════════════ */
 let session = null;   // { title, startedAt, durationMs, segments: [], notes }
 let noKeyBanner = null;
-let rec = null, elapsed = 0, tickTimer = null, queueRunning = false;
+let rec = null, speech = null, meter = null, interim = '';
+let elapsed = 0, tickTimer = null, queueRunning = false;
 
 function doneText() {
   return session.segments.filter((s) => s.status === 'done').map((s) => s.text).join(' ');
@@ -563,9 +677,13 @@ async function drain() {
 function renderLive() {
   const host = $('live');
   const segs = session ? session.segments.filter((s) => s.status !== 'skipped') : [];
-  if (!segs.length) {
+  const interimLine = interim
+    ? `<div class="tline pending"><span class="ts"></span><span class="tx grow">${escapeHtml(interim)}</span></div>`
+    : '';
+  if (!segs.length && !interim) {
     host.innerHTML = session
-      ? '<p class="faint small" style="text-align:center;padding:26px 0">Listening — text appears after the first pause.</p>'
+      ? `<p class="faint small" style="text-align:center;padding:26px 0">Listening — ${
+          activeEngine() === 'webspeech' ? 'words appear as you speak' : 'text appears after the first pause'}.</p>`
       : '';
     renderTranscriptTab(); return;
   }
@@ -575,8 +693,8 @@ function renderLive() {
       : 'transcribing…';
     return `<div class="tline ${s.status === 'done' ? '' : s.status === 'failed' ? 'failed' : 'pending'}">
       <span class="ts">${fmt(s.startMs)}</span><span class="tx grow">${body}</span></div>`;
-  }).join('') + '</div>';
-  if (rec) host.scrollIntoView({ behavior: 'smooth', block: 'end' });
+  }).join('') + interimLine + '</div>';
+  if (rec || speech) host.scrollIntoView({ behavior: 'smooth', block: 'end' });
   renderTranscriptTab();
 }
 
@@ -601,7 +719,8 @@ function renderNotesHeader() {
   $('gen').disabled = !ready;
   $('copy').disabled = !done.length;
   $('dl').disabled = !done.length;
-  $('gen').textContent = session.notes ? 'Regenerate notes' : 'Generate notes';
+  $('gen').textContent = !settings.key ? 'Copy notes prompt'
+    : session.notes ? 'Regenerate notes' : 'Generate notes';
 }
 
 function renderNotes() {
@@ -687,64 +806,133 @@ function renderSaved() {
 }
 
 /* ══════════════ recording flow ══════════════ */
+function recordingNow() { return Boolean(rec || speech); }
+
+function setRecordingChrome(on) {
+  $('record').setAttribute('aria-label', on ? 'Stop recording' : 'Start recording');
+  $('record').innerHTML = on
+    ? '<svg viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2.5"/></svg>'
+    : '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><rect x="9" y="2" width="6" height="12" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v4"/></svg>';
+  $('pause').hidden = !on;
+  if (on) $('pause').textContent = 'Pause';
+  $('setup').hidden = on;
+  $('status').innerHTML = on
+    ? '<span class="dot"></span> <span class="small muted">Recording</span>'
+    : '<span class="small faint">Ready</span>';
+  if (!on) $('level').style.width = '0%';
+}
+
+let clock = null;
+
 async function startRecording() {
-  if (!settings.key) {
-    alertBox('warn', 'No Groq API key yet — recording will work, but nothing will be transcribed. Add one under <strong>Settings</strong>.');
+  const engine = activeEngine();
+  if (engine === 'none') {
+    alertBox('error', 'This browser has no built-in speech recognition. Use Chrome or Edge, or add a free Groq key under <strong>Settings</strong>.');
+    return;
   }
+
   session = {
     title: $('title').value.trim() || `Recording — ${new Date().toLocaleString([], { dateStyle: 'short', timeStyle: 'short' })}`,
-    startedAt: Date.now(), durationMs: 0, segments: [], notes: null,
+    startedAt: Date.now(), durationMs: 0, segments: [], notes: null, engine,
   };
-  elapsed = 0;
-
-  rec = new Recorder(
-    (seg) => { session.segments.push({ ...seg, text: '', status: 'pending', attempts: 0, error: null }); renderLive(); drain(); },
-    (level, speaking) => { const el = $('level'); el.style.width = Math.round(level * 100) + '%'; el.classList.toggle('on', speaking); },
-    (err) => alertBox('error', escapeHtml(err.message)),
-  );
+  elapsed = 0; interim = '';
 
   try {
-    await rec.start();
+    if (engine === 'webspeech') {
+      // The meter is a nicety; recognition matters more, so a meter failure
+      // must not stop the recording.
+      meter = new Meter();
+      await meter.start((level, speaking) => {
+        const el = $('level'); el.style.width = Math.round(level * 100) + '%'; el.classList.toggle('on', speaking);
+      }).catch(() => { meter = null; });
+
+      speech = new SpeechEngine(
+        (text) => {
+          if (!text) return;
+          interim = '';
+          session.segments.push({ index: session.segments.length, startMs: elapsed, endMs: elapsed, text, status: 'done', blob: null });
+          renderLive(); renderNotesHeader();
+        },
+        (text) => { interim = text; renderLive(); },
+        (err, fatal) => {
+          alertBox('error', escapeHtml(err.message));
+          // Nothing more will be transcribed, so don't leave a clock ticking
+          // over a recording that isn't happening. Deferred by a tick because
+          // this can fire synchronously inside speech.start(), before
+          // startRecording has finished putting the UI into its recording
+          // state — tearing down first would then be undone.
+          if (fatal) setTimeout(() => { if (recordingNow()) stopRecording(); }, 0);
+        },
+      );
+      speech.start();
+    } else {
+      rec = new Recorder(
+        (seg) => { session.segments.push({ ...seg, text: '', status: 'pending', attempts: 0, error: null }); renderLive(); drain(); },
+        (level, speaking) => { const el = $('level'); el.style.width = Math.round(level * 100) + '%'; el.classList.toggle('on', speaking); },
+        (err) => alertBox('error', escapeHtml(err.message)),
+      );
+      await rec.start();
+    }
   } catch (e) {
-    rec = null; session = null;
-    const name = e.name;
+    await teardown();
+    session = null;
     alertBox('error', escapeHtml(
-      name === 'NotAllowedError' ? 'Microphone access was blocked. Allow it in your browser’s site settings and try again.' :
-      name === 'NotFoundError' ? 'No microphone found. Plug one in and try again.' :
-      name === 'NotReadableError' ? 'The microphone is in use by another app. Close it and try again.' :
+      e.name === 'NotAllowedError' ? 'Microphone access was blocked. Allow it in your browser’s site settings and try again.' :
+      e.name === 'NotFoundError' ? 'No microphone found. Plug one in and try again.' :
+      e.name === 'NotReadableError' ? 'The microphone is in use by another app. Close it and try again.' :
       (e.message || 'Could not start recording.')));
     return;
   }
 
-  $('status').innerHTML = '<span class="dot"></span> <span class="small muted">Recording</span>';
-  $('record').setAttribute('aria-label', 'Stop recording');
-  $('record').innerHTML = '<svg viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2.5"/></svg>';
-  $('pause').hidden = false; $('pause').textContent = 'Pause';
-  $('setup').hidden = true;
-  const t0 = Date.now();
-  let pausedTotal = 0, pausedAt = 0;
-  tickTimer = setInterval(() => { elapsed = Date.now() - t0 - pausedTotal; $('timer').textContent = fmt(elapsed); }, 250);
-  rec._pauseBook = { get pausedTotal() { return pausedTotal; }, add(ms) { pausedTotal += ms; }, mark() { pausedAt = Date.now(); }, since() { return Date.now() - pausedAt; } };
+  setRecordingChrome(true);
+  clock = { t0: Date.now(), pausedTotal: 0, pausedAt: 0, paused: false };
+  tickTimer = setInterval(() => {
+    if (clock.paused) return;
+    elapsed = Date.now() - clock.t0 - clock.pausedTotal;
+    $('timer').textContent = fmt(elapsed);
+  }, 250);
   renderLive(); renderNotesHeader();
   window.onbeforeunload = () => true;
 }
 
-async function stopRecording() {
+async function teardown() {
   clearInterval(tickTimer); tickTimer = null;
+  if (speech) { speech.stop(); speech = null; }
+  if (meter) { await meter.stop(); meter = null; }
+  if (rec) { await rec.stop(); rec = null; }
+}
+
+async function stopRecording() {
   session.durationMs = elapsed;
-  await rec.stop();
-  rec = null;
+  interim = '';
+  await teardown();
   window.onbeforeunload = null;
-  $('status').innerHTML = '<span class="small faint">Ready</span>';
-  $('record').setAttribute('aria-label', 'Start recording');
-  $('record').innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><rect x="9" y="2" width="6" height="12" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v4"/></svg>';
-  $('pause').hidden = true;
-  $('setup').hidden = false;
-  $('level').style.width = '0%';
-  renderNotesHeader();
+  setRecordingChrome(false);
+  renderLive(); renderNotesHeader();
   await drain();
   saveSession();
-  show('notes');
+  // Only move to the notes once there is something to show. A recording that
+  // captured nothing — a failed engine, a muted mic — should leave you on the
+  // Record tab, where the fix is.
+  if (doneText()) show('notes');
+}
+
+function togglePause() {
+  if (!recordingNow() || !clock) return;
+  if (clock.paused) {
+    clock.pausedTotal += Date.now() - clock.pausedAt;
+    clock.paused = false;
+    speech?.resume(); rec?.resume();
+    $('pause').textContent = 'Pause';
+    $('status').innerHTML = '<span class="dot"></span> <span class="small muted">Recording</span>';
+  } else {
+    clock.pausedAt = Date.now();
+    clock.paused = true;
+    speech?.pause(); rec?.pause();
+    interim = ''; renderLive();
+    $('pause').textContent = 'Resume';
+    $('status').innerHTML = '<span class="pill warn">Paused</span>';
+  }
 }
 
 /* ══════════════ tabs ══════════════ */
@@ -767,22 +955,23 @@ $('v-notes').onclick = () => { $('notes-out').hidden = false; $('tx-out').hidden
 $('v-tx').onclick = () => { $('notes-out').hidden = true; $('tx-out').hidden = false;
   $('v-notes').setAttribute('aria-pressed', 'false'); $('v-tx').setAttribute('aria-pressed', 'true'); };
 
-$('record').onclick = () => (rec ? stopRecording() : startRecording());
-$('pause').onclick = () => {
-  if (!rec) return;
-  const book = rec._pauseBook;
-  if (rec.paused) {
-    book.add(book.since()); rec.resume();
-    $('pause').textContent = 'Pause';
-    $('status').innerHTML = '<span class="dot"></span> <span class="small muted">Recording</span>';
-  } else {
-    book.mark(); rec.pause();
-    $('pause').textContent = 'Resume';
-    $('status').innerHTML = '<span class="pill warn">Paused</span>';
-  }
-};
+$('record').onclick = () => (recordingNow() ? stopRecording() : startRecording());
+$('pause').onclick = togglePause;
 
 $('gen').onclick = async () => {
+  // The notes pass needs a model. Without a key, hand the user a prompt they
+  // can paste into any assistant rather than leaving the button dead.
+  if (!settings.key) {
+    const prompt = NOTES_PROMPT_HEADER + '\n\n' +
+      timedChunks().map((c) => `[t=${Math.round(c.startMs)}] ${c.text}`).join('\n');
+    try {
+      await navigator.clipboard.writeText(prompt);
+      alertBox('info', 'Transcript and instructions copied. Paste them into Claude or any assistant to get notes back. Adding a free Groq key under <strong>Settings</strong> does this in the app instead.');
+    } catch {
+      alertBox('info', 'Clipboard blocked — use <strong>Download</strong> and paste the file into an assistant, or add a free Groq key under Settings.');
+    }
+    return;
+  }
   const b = $('gen'); b.disabled = true; b.textContent = 'Working…';
   try {
     session.notes = await structure(timedChunks());
@@ -810,12 +999,24 @@ $('dl').onclick = () => {
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 };
 
+function renderEngineHint() {
+  const e = activeEngine();
+  const text =
+    e === 'webspeech' ? 'Using your browser\u2019s own recogniser. Free, no account, words appear as you speak. Chrome and Edge only, and it needs a connection.' :
+    e === 'whisper'   ? 'Using Whisper on Groq. More accurate on jargon and accents, and the glossary below is fed to it while it decodes. Text arrives a few seconds behind.' :
+                        'No engine available. This browser has no speech recognition \u2014 add a Groq key, or use Chrome or Edge.';
+  $('engine-hint').textContent = text;
+  renderNotesHeader();
+}
+$('engine').value = settings.engine;
+$('engine').onchange = (e) => { settings.engine = e.target.value; LS.set('engine', settings.engine); renderEngineHint(); };
 $('key').value = settings.key;
 $('key').oninput = (e) => {
   settings.key = e.target.value.trim();
   LS.set('key', settings.key);
   // Clear the "no key yet" prompt as soon as one is entered.
   if (settings.key && noKeyBanner) { noKeyBanner.remove(); noKeyBanner = null; }
+  renderEngineHint();
 };
 $('lang').value = settings.lang;
 $('lang').onchange = (e) => { settings.lang = e.target.value; LS.set('lang', settings.lang); };
@@ -837,9 +1038,17 @@ $('maxseg').oninput = (e) => { settings.maxSeg = +e.target.value; LS.set('maxSeg
   if (!navigator.mediaDevices?.getUserMedia || !window.MediaRecorder) {
     alertBox('error', 'This browser cannot record audio. Try Chrome, Edge or Safari.', false);
   }
-  if (!settings.key) {
-    noKeyBanner = alertBox('info', 'Add a free Groq API key under <strong>Settings</strong> to transcribe. Get one at console.groq.com — no card needed.');
+  const e = activeEngine();
+  if (e === 'webspeech') {
+    noKeyBanner = alertBox('info',
+      'Ready to record using your browser\u2019s own speech recognition \u2014 no account needed. ' +
+      'For better accuracy on jargon and accents, add a free Groq key under <strong>Settings</strong>.');
+  } else if (e === 'none') {
+    alertBox('warn',
+      'This browser has no built-in speech recognition. Open this page in <strong>Chrome</strong> or ' +
+      '<strong>Edge</strong>, or add a free Groq key under Settings to use Whisper instead.', false);
   }
+  renderEngineHint();
   renderLive(); renderNotes(); renderSaved();
 })();
 </script>
