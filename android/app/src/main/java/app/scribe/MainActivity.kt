@@ -169,11 +169,11 @@ class MainActivity : AppCompatActivity() {
 
     /** Picks the audio out of a share or an open request, if there is one. */
     private fun handleShare(intent: Intent?) {
-        val uri: Uri? = when (intent?.action) {
+        val uri = when (intent?.action) {
             Intent.ACTION_SEND ->
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU)
                     intent.getParcelableExtra(Intent.EXTRA_STREAM, Uri::class.java)
-                else @Suppress("DEPRECATION") intent.getParcelableExtra(Intent.EXTRA_STREAM)
+                else @Suppress("DEPRECATION") intent.getParcelableExtra<Uri>(Intent.EXTRA_STREAM)
             Intent.ACTION_VIEW -> intent.data
             else -> null
         } ?: return
