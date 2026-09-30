@@ -169,7 +169,7 @@
       <div class="tiny faint mono" id="buildline" style="text-align:right">__BUILD_STAMP__</div>
       <div class="field" style="border-top:1px solid var(--border);padding-top:14px">
         <label for="importfile">Or import a recording</label>
-        <input id="importfile" class="input" type="file" accept="audio/*,.m4a,.mp3,.wav,.aac,.ogg,.webm">
+        <input id="importfile" class="input" type="file" multiple accept="audio/*,.m4a,.mp3,.wav,.aac,.ogg,.webm">
         <button id="importnative" class="btn block" hidden>Choose a recording</button>
         <button id="importbrowse" class="btn block" hidden style="margin-top:8px">Browse recordings on this phone</button>
         <div id="recordinglist" hidden style="margin-top:10px"></div>
@@ -1524,59 +1524,96 @@ $('v-tx').onclick = () => { $('notes-out').hidden = true; $('tx-out').hidden = f
 
 $('record').onclick = () => (recordingNow() ? stopRecording() : startRecording());
 
-async function runImport(file) {
+/**
+ * Imports one or more recordings, one after another.
+ *
+ * Sequential on purpose: each file is already split into parts internally and
+ * those go up several at a time, so overlapping whole files would only trade
+ * one queue for two and make the rate limit the bottleneck. Each file becomes
+ * its own recording with its own notes — they are separate lectures, not one
+ * long one.
+ *
+ * Takes File objects, or {url, name} descriptors for something the app has
+ * copied out of the phone's storage.
+ */
+async function runImportBatch(items) {
+  const files = (items || []).filter(Boolean);
+  if (!files.length) return;
   if (recordingNow()) { alertBox('warn', 'Stop the current recording before importing.'); return; }
+
   const status = $('importstatus'), msg = $('importmsg');
   status.hidden = false;
-  $('importfile').disabled = true;
-  $('importnative').disabled = true;
-  const progress = (t) => { msg.textContent = t; };
-  progress('Starting…');
-  try {
-    await importRecording(file, progress);
-    saveSession();
-    renderNotes();
-    if (doneText()) show('notes');
-    else alertBox('warn', 'That file transcribed to nothing. Check it actually contains speech.');
-  } catch (err) {
-    alertBox('error', escapeHtml(err.message));
-  } finally {
-    status.hidden = true;
-    $('importfile').disabled = false;
-    $('importnative').disabled = false;
+  for (const id of ['importfile', 'importnative', 'importbrowse']) $(id).disabled = true;
+
+  const many = files.length > 1;
+  const failures = [];
+  let done = 0;
+
+  for (let i = 0; i < files.length; i++) {
+    const item = files[i];
+    const label = many ? `File ${i + 1} of ${files.length}` : '';
+    const progress = (t) => { msg.textContent = label ? `${label} — ${t}` : t; };
+    try {
+      progress('Reading…');
+      const file = item instanceof File ? item : await fetchPicked(item);
+      await importRecording(file, progress);
+      saveSession();
+      done++;
+      // A batch runs for a while, so let each one appear as it lands rather
+      // than leaving the library empty until the end.
+      renderSaved();
+    } catch (err) {
+      // One bad file must not take the rest of the batch with it.
+      const who = item instanceof File ? item.name : (item.name || 'a file');
+      failures.push(`${who}: ${err.message}`);
+    }
+    if (item && item.release) { try { window.ScribeNative.releaseImport(item.release); } catch {} }
   }
+
+  status.hidden = true;
+  for (const id of ['importfile', 'importnative', 'importbrowse']) $(id).disabled = false;
+
+  if (failures.length) {
+    alertBox(done ? 'warn' : 'error',
+      `${done} of ${files.length} imported.` +
+      `<div class="tiny" style="margin-top:4px">${failures.map(escapeHtml).join('<br>')}</div>`);
+  }
+  renderNotesHeader(); renderNotes();
+  if (done && doneText()) show('notes');
+  else if (done && !failures.length) alertBox('warn', 'Nothing was transcribed. Check the files actually contain speech.');
+}
+
+/** Pulls a file the app copied somewhere the page can read. */
+async function fetchPicked({ url, name }) {
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`could not be read (${res.status})`);
+  const blob = await res.blob();
+  // Whisper infers the container from the filename, so keep the real one.
+  return new File([blob], name || 'recording.m4a', { type: blob.type || 'audio/mp4' });
 }
 
 $('importfile').onchange = async (e) => {
-  const file = e.target.files?.[0];
-  if (file) await runImport(file);
+  const files = Array.from(e.target.files || []);
+  if (files.length) await runImportBatch(files);
   e.target.value = '';
 };
 
-// In the app, ask the host for the file directly. A WebView's file input is
-// inert unless the host implements a chooser for it, so going straight to the
-// host removes the part most likely to do nothing at all.
+// In the app, ask the host for files directly. A WebView's file input is inert
+// unless the host implements a chooser for it.
 $('importnative').onclick = () => {
   try { window.ScribeNative.pickFile(); }
   catch { alertBox('error', 'Could not open the file picker.'); }
 };
 
-/** The app has copied the pick somewhere the page can read it. */
-window.__scribeFilePicked = async (url, name) => {
-  const status = $('importstatus'), msg = $('importmsg');
-  status.hidden = false;
-  msg.textContent = 'Reading the file…';
-  try {
-    const res = await fetch(url);
-    if (!res.ok) throw new Error(`Could not read the chosen file (${res.status}).`);
-    const blob = await res.blob();
-    // Whisper picks the container from the filename, so keep the real one.
-    await runImport(new File([blob], name || 'recording.m4a', { type: blob.type || 'audio/mp4' }));
-  } catch (err) {
-    status.hidden = true;
-    alertBox('error', escapeHtml(err.message));
-  }
+/** The app has copied one or more picks somewhere the page can read them. */
+window.__scribeFilesPicked = (items) => {
+  const list = (Array.isArray(items) ? items : []).filter((r) => r && r.url);
+  if (!list.length) { $('importstatus').hidden = true; return; }
+  runImportBatch(list);
 };
+
+/** Single-file entry point, kept so neither path can go stale. */
+window.__scribeFilePicked = (url, name) => window.__scribeFilesPicked([{ url, name }]);
 
 window.__scribeFileCancelled = () => { $('importstatus').hidden = true; };
 
@@ -1607,22 +1644,55 @@ window.__scribeRecordings = (items) => {
     host.innerHTML = '<div class="small">No audio files found on this phone. Record something in your Recorder app first, or use Share from there.</div>';
     return;
   }
-  host.innerHTML = '<div class="list">' + list.map((r) => {
-    const mins = r.duration ? fmt(Number(r.duration)) : '';
-    const mb = r.size ? (Number(r.size) / 1048576).toFixed(1) + ' MB' : '';
-    return `<button class="sess" data-rec="${escapeHtml(String(r.id))}" style="width:100%;text-align:left;background:none;border:0;border-bottom:1px solid var(--border);cursor:pointer">
-      <span class="grow"><span class="t">${escapeHtml(r.name || 'recording')}</span>
-      <span class="tiny faint" style="display:block">${[mins, mb].filter(Boolean).join(' · ')}</span></span></button>`;
-  }).join('') + '</div>';
-  host.querySelectorAll('[data-rec]').forEach((el) => {
-    el.onclick = () => {
-      host.hidden = true;
-      $('importstatus').hidden = false;
-      $('importmsg').textContent = 'Opening…';
-      try { window.ScribeNative.openRecording(el.dataset.rec); }
-      catch { $('importstatus').hidden = true; alertBox('error', 'Could not open that recording.'); }
+  const chosen = new Set();
+
+  host.innerHTML =
+    '<div class="list">' + list.map((r) => {
+      const mins = r.duration ? fmt(Number(r.duration)) : '';
+      const mb = r.size ? (Number(r.size) / 1048576).toFixed(1) + ' MB' : '';
+      return `<label class="sess" style="cursor:pointer">
+        <input type="checkbox" data-rec="${escapeHtml(String(r.id))}" style="width:20px;height:20px;flex:none">
+        <span class="grow"><span class="t">${escapeHtml(r.name || 'recording')}</span>
+        <span class="tiny faint" style="display:block">${[mins, mb].filter(Boolean).join(' \u00b7 ')}</span></span></label>`;
+    }).join('') + '</div>' +
+    `<div class="row" style="margin-top:10px">
+       <button class="btn primary grow" id="rec-import" disabled>Choose recordings</button>
+       <button class="btn sm" id="rec-all">All</button>
+     </div>`;
+
+  const importBtn = $('rec-import');
+  const sync = () => {
+    importBtn.disabled = chosen.size === 0;
+    importBtn.textContent = chosen.size === 0 ? 'Choose recordings'
+      : chosen.size === 1 ? 'Import 1 recording'
+      : `Import ${chosen.size} recordings`;
+  };
+
+  host.querySelectorAll('[data-rec]').forEach((box) => {
+    box.onchange = () => {
+      if (box.checked) chosen.add(box.dataset.rec); else chosen.delete(box.dataset.rec);
+      sync();
     };
   });
+
+  $('rec-all').onclick = () => {
+    const boxes = [...host.querySelectorAll('[data-rec]')];
+    const turnOn = chosen.size < boxes.length;
+    boxes.forEach((b) => { b.checked = turnOn; if (turnOn) chosen.add(b.dataset.rec); else chosen.delete(b.dataset.rec); });
+    $('rec-all').textContent = turnOn ? 'None' : 'All';
+    sync();
+  };
+
+  importBtn.onclick = () => {
+    if (!chosen.size) return;
+    host.hidden = true;
+    $('importstatus').hidden = false;
+    $('importmsg').textContent = 'Opening\u2026';
+    try { window.ScribeNative.openRecordings(JSON.stringify([...chosen])); }
+    catch { $('importstatus').hidden = true; alertBox('error', 'Could not open those recordings.'); }
+  };
+
+  sync();
 };
 $('pause').onclick = togglePause;
 

@@ -45,8 +45,8 @@ class MainActivity : AppCompatActivity() {
 
     private lateinit var imports: File
 
-    /** A share that arrived before the page was ready to receive it. */
-    private var pendingShare: Uri? = null
+    /** Shares that arrived before the page was ready to receive them. */
+    private var pendingShare: List<Uri> = emptyList()
     private var pageReady = false
 
     /** The page's pending <input type="file">, waiting on the picker. */
@@ -54,12 +54,9 @@ class MainActivity : AppCompatActivity() {
 
     /** The picker opened by the page's own button, rather than by an input. */
     private val pickForBridge = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
-        val uri = result.data?.data
-        if (result.resultCode != RESULT_OK || uri == null) {
-            toJs("window.__scribeFileCancelled && window.__scribeFileCancelled()")
-        } else {
-            copyIn(uri)
-        }
+        val uris = if (result.resultCode == RESULT_OK) urisFrom(result.data) else emptyList()
+        if (uris.isEmpty()) toJs("window.__scribeFileCancelled && window.__scribeFileCancelled()")
+        else copyIn(uris)
     }
 
     private val pickFile = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
@@ -117,7 +114,11 @@ class MainActivity : AppCompatActivity() {
                 override fun onPageFinished(view: WebView, url: String) {
                     pageReady = true
                     // A share can arrive before there is anything to hand it to.
-                    pendingShare?.let { pendingShare = null; copyIn(it) }
+                    if (pendingShare.isNotEmpty()) {
+                        val queued = pendingShare
+                        pendingShare = emptyList()
+                        copyIn(queued)
+                    }
                 }
             }
             webChromeClient = object : WebChromeClient() {
@@ -181,16 +182,22 @@ class MainActivity : AppCompatActivity() {
 
     /** Picks the audio out of a share or an open request, if there is one. */
     private fun handleShare(intent: Intent?) {
-        val uri = when (intent?.action) {
-            Intent.ACTION_SEND ->
+        val uris: List<Uri> = when (intent?.action) {
+            Intent.ACTION_SEND -> listOfNotNull(
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU)
                     intent.getParcelableExtra(Intent.EXTRA_STREAM, Uri::class.java)
-                else @Suppress("DEPRECATION") intent.getParcelableExtra<Uri>(Intent.EXTRA_STREAM)
-            Intent.ACTION_VIEW -> intent.data
-            else -> null
-        } ?: return
+                else @Suppress("DEPRECATION") intent.getParcelableExtra<Uri>(Intent.EXTRA_STREAM),
+            )
+            Intent.ACTION_SEND_MULTIPLE ->
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU)
+                    intent.getParcelableArrayListExtra(Intent.EXTRA_STREAM, Uri::class.java) ?: emptyList()
+                else @Suppress("DEPRECATION") intent.getParcelableArrayListExtra<Uri>(Intent.EXTRA_STREAM) ?: emptyList()
+            Intent.ACTION_VIEW -> listOfNotNull(intent.data)
+            else -> emptyList()
+        }
+        if (uris.isEmpty()) return
 
-        if (pageReady) copyIn(uri) else pendingShare = uri
+        if (pageReady) copyIn(uris) else pendingShare = uris
     }
 
     override fun onResume() {
@@ -232,10 +239,20 @@ class MainActivity : AppCompatActivity() {
         // Filtering strictly on audio/* greys out recordings saved with a
         // vague type, which is common enough to look like a broken picker.
         type = "*/*"
+        putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true)
         putExtra(
             Intent.EXTRA_MIME_TYPES,
             arrayOf("audio/*", "video/mp4", "application/ogg", "application/octet-stream"),
         )
+    }
+
+    /** A result may carry one uri in the data, or several in the clip data. */
+    private fun urisFrom(intent: Intent?): List<Uri> {
+        if (intent == null) return emptyList()
+        intent.clipData?.let { clip ->
+            return (0 until clip.itemCount).mapNotNull { clip.getItemAt(it).uri }
+        }
+        return listOfNotNull(intent.data)
     }
 
     private fun launchPicker(): Boolean {
@@ -265,70 +282,54 @@ class MainActivity : AppCompatActivity() {
      * a display name is arbitrary text and has no business becoming a path —
      * and hands the page a URL it can fetch.
      */
-    private fun copyIn(uri: Uri) {
-        // Off the main thread: a lecture can be tens of megabytes, and copying
-        // that where the UI runs would freeze the app long enough to be killed.
+    /**
+     * Copies each pick into internal storage and hands the page a list of URLs
+     * it can fetch.
+     *
+     * Names are ours, not the file's: a display name is arbitrary text and has
+     * no business becoming a path. The original travels alongside, because
+     * Whisper infers the container from it. The copy runs off the main thread
+     * — a batch of lectures is hundreds of megabytes, and copying that where
+     * the UI runs would freeze the app long enough to be killed.
+     */
+    private fun copyIn(uris: List<Uri>) {
+        if (uris.isEmpty()) return
         thread(isDaemon = true) {
-            val name = displayName(uri)
-            val ext = name.substringAfterLast('.', "").takeIf { it.length in 1..5 && it.all(Char::isLetterOrDigit) } ?: "m4a"
-            val dest = File(imports, "pick-${System.currentTimeMillis()}.$ext")
+            // Anything left from a previous batch the page has finished with.
+            runCatching { imports.listFiles()?.forEach { it.delete() } }
 
-            val ok = runCatching {
-                imports.listFiles()?.forEach { it.delete() }   // only ever one at a time
-                contentResolver.openInputStream(uri)?.use { input ->
-                    dest.outputStream().use { output -> input.copyTo(output) }
-                } ?: return@runCatching false
-                dest.length() > 0
-            }.getOrDefault(false)
+            val out = JSONArray()
+            uris.forEachIndexed { i, uri ->
+                val name = displayName(uri)
+                val ext = name.substringAfterLast('.', "")
+                    .takeIf { it.length in 1..5 && it.all(Char::isLetterOrDigit) } ?: "m4a"
+                val dest = File(imports, "pick-${System.currentTimeMillis()}-$i.$ext")
+                val ok = runCatching {
+                    contentResolver.openInputStream(uri)?.use { input ->
+                        dest.outputStream().use { output -> input.copyTo(output) }
+                    } ?: return@runCatching false
+                    dest.length() > 0
+                }.getOrDefault(false)
+
+                if (ok) {
+                    out.put(
+                        JSONObject()
+                            .put("url", "https://appassets.androidplatform.net/imports/${dest.name}")
+                            .put("name", name)
+                            .put("release", dest.name),
+                    )
+                } else {
+                    dest.delete()
+                }
+            }
 
             runOnUiThread {
-                if (!ok) {
-                    dest.delete()
-                    toJs("window.__scribeError && window.__scribeError(${json("That file could not be read.")})")
+                if (out.length() == 0) {
+                    toJs("window.__scribeError && window.__scribeError(${json("Those files could not be read.")})")
                 } else {
-                    val url = "https://appassets.androidplatform.net/imports/${dest.name}"
-                    toJs("window.__scribeFilePicked && window.__scribeFilePicked(${json(url)}, ${json(name)})")
+                    toJs("window.__scribeFilesPicked && window.__scribeFilesPicked($out)")
                 }
             }
-        }
-    }
-
-    private fun hasMediaAccess() =
-        ContextCompat.checkSelfPermission(this, mediaPermission) == PackageManager.PERMISSION_GRANTED
-
-    /**
-     * Lists the audio already on the phone so the app can show its own
-     * chooser. The system document picker is one component among many on a
-     * given device and can be absent, replaced or simply uncooperative;
-     * reading MediaStore does not depend on any of that.
-     */
-    private fun emitRecordings() {
-        thread(isDaemon = true) {
-            val out = JSONArray()
-            runCatching {
-                val cols = arrayOf(
-                    MediaStore.Audio.Media._ID,
-                    MediaStore.Audio.Media.DISPLAY_NAME,
-                    MediaStore.Audio.Media.SIZE,
-                    MediaStore.Audio.Media.DURATION,
-                )
-                contentResolver.query(
-                    MediaStore.Audio.Media.EXTERNAL_CONTENT_URI,
-                    cols, null, null,
-                    "${MediaStore.Audio.Media.DATE_ADDED} DESC",
-                )?.use { c ->
-                    while (c.moveToNext() && out.length() < 300) {
-                        out.put(
-                            JSONObject()
-                                .put("id", c.getLong(0).toString())
-                                .put("name", c.getString(1) ?: "recording")
-                                .put("size", c.getLong(2))
-                                .put("duration", c.getLong(3)),
-                        )
-                    }
-                }
-            }
-            runOnUiThread { toJs("window.__scribeRecordings && window.__scribeRecordings($out)") }
         }
     }
 
@@ -374,13 +375,29 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-        /** Import one of the entries from that list. */
+        /** Import entries from that list — one id, or a JSON array of them. */
         @JavascriptInterface
-        fun openRecording(id: String) {
+        fun openRecordings(idsJson: String) {
             runOnUiThread {
-                val n = id.toLongOrNull() ?: return@runOnUiThread
-                copyIn(ContentUris.withAppendedId(MediaStore.Audio.Media.EXTERNAL_CONTENT_URI, n))
+                val ids = runCatching {
+                    val a = JSONArray(idsJson)
+                    (0 until a.length()).mapNotNull { a.optString(it).toLongOrNull() }
+                }.getOrDefault(emptyList())
+                if (ids.isEmpty()) return@runOnUiThread
+                copyIn(ids.map { ContentUris.withAppendedId(MediaStore.Audio.Media.EXTERNAL_CONTENT_URI, it) })
             }
+        }
+
+        @JavascriptInterface
+        fun openRecording(id: String) = openRecordings("[\"$id\"]")
+
+        /** The page has finished with a copied file, so it can go. */
+        @JavascriptInterface
+        fun releaseImport(name: String) {
+            // Constrain to our own directory: the name comes back through
+            // JavaScript and must not be able to point anywhere else.
+            val safe = File(imports, File(name).name)
+            if (safe.parentFile == imports) safe.delete()
         }
 
         @JavascriptInterface
