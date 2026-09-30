@@ -101,6 +101,7 @@ class RecordingService : Service() {
         var totalSamples = 0L
         var segStartMs = 0L
         var silenceMs = 0
+        var speechMs = 0
         var sawSpeech = false
 
         recorder.startRecording()
@@ -119,7 +120,7 @@ class RecordingService : Service() {
                 totalSamples += read
 
                 val blockMs = read * 1000 / SAMPLE_RATE
-                if (vad.speaking) { sawSpeech = true; silenceMs = 0 } else silenceMs += blockMs
+                if (vad.speaking) { sawSpeech = true; speechMs += blockMs.toInt(); silenceMs = 0 } else silenceMs += blockMs.toInt()
 
                 val nowMs = totalSamples * 1000 / SAMPLE_RATE
                 val durMs = nowMs - segStartMs
@@ -127,20 +128,22 @@ class RecordingService : Service() {
                 val atCap = durMs >= MAX_SEG_SEC * 1000
 
                 if (atPause || atCap) {
-                    // Keep anything audible, not only what the detector called
-                    // speech: one wasted upload costs far less than a lost
-                    // stretch of a lecture.
-                    if (sawSpeech || vad.peak > Vad.AUDIBLE) {
+                    // A pause handed to Whisper comes back as an ellipsis or
+                    // invented filler, so require a real amount of speech. The
+                    // loudness escape hatch keeps a segment the detector
+                    // misjudged: losing part of a lecture costs far more than
+                    // one wasted upload.
+                    if (speechMs >= MIN_SPEECH_MS || vad.peak > Vad.AUDIBLE * 4) {
                         emit(index++, segStartMs, nowMs, segment, segLen)
                     }
-                    segLen = 0; segStartMs = nowMs; silenceMs = 0; sawSpeech = false
+                    segLen = 0; segStartMs = nowMs; silenceMs = 0; sawSpeech = false; speechMs = 0
                     vad.resetPeak()
                 }
             }
 
             // Flush whatever the final partial segment holds.
             val nowMs = totalSamples * 1000 / SAMPLE_RATE
-            if (segLen > 0 && (sawSpeech || vad.peak > Vad.AUDIBLE)) {
+            if (segLen > 0 && (speechMs >= MIN_SPEECH_MS || vad.peak > Vad.AUDIBLE * 4)) {
                 emit(index, segStartMs, nowMs, segment, segLen)
             }
         } catch (t: Throwable) {
@@ -205,6 +208,7 @@ class RecordingService : Service() {
         private const val MIN_SEG_MS = 4_000
         private const val MAX_SEG_SEC = 12
         private const val SILENCE_HOLD_MS = 550
+        private const val MIN_SPEECH_MS = 400
 
         @Volatile private var instance: RecordingService? = null
 
