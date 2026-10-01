@@ -205,12 +205,23 @@ class MainActivity : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
+        // Only feed the meter while there is a screen to show it on; it is
+        // several calls a second into the WebView.
+        RecordingService.levelListener = { level, speaking ->
+            runOnUiThread { toJs("window.__scribeLevel && window.__scribeLevel($level, $speaking)") }
+        }
         // Anything captured while the activity was gone.
         RecordingService.drainPending().forEach { deliver(it) }
         toJs("window.__scribeState && window.__scribeState(${RecordingService.isRunning})")
     }
 
+    override fun onPause() {
+        RecordingService.levelListener = null
+        super.onPause()
+    }
+
     override fun onDestroy() {
+        RecordingService.levelListener = null
         RecordingService.listener = null
         RecordingService.errorListener = null
         // The WebView is not destroyed while a recording is running, so the

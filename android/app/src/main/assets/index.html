@@ -151,6 +151,7 @@
       </div>
       <div class="timer" id="timer">0:00</div>
       <div class="meter" aria-hidden="true"><div id="level"></div></div>
+      <div id="capture" class="tiny faint mono" style="min-height:16px"></div>
       <div class="controls">
         <button class="btn" id="pause" hidden></button>
         <button class="big" id="record" aria-label="Start recording">
@@ -166,7 +167,7 @@
         <label for="title">Title</label>
         <input id="title" class="input" placeholder="e.g. Organic chemistry — week 4">
       </div>
-      <div class="tiny faint mono" id="buildline" style="text-align:right">2026-10-01 04:54 UTC</div>
+      <div class="tiny faint mono" id="buildline" style="text-align:right">2026-10-01 09:52 UTC</div>
       <div class="field" style="border-top:1px solid var(--border);padding-top:14px">
         <label for="importfile">Or import a recording</label>
         <input id="importfile" class="input" type="file" multiple accept="audio/*,.m4a,.mp3,.wav,.aac,.ogg,.webm">
@@ -268,7 +269,7 @@
       </div>
     </div>
     <div class="card small muted">
-      <div class="tiny faint mono" style="float:right">build 2026-10-01 04:54 UTC</div>
+      <div class="tiny faint mono" style="float:right">build 2026-10-01 09:52 UTC</div>
       <strong style="color:var(--text)">What this is.</strong>
       A single-file version of Scribe for trying the pipeline. It keeps one recording at a time
       plus a list of saved transcripts in this browser. The full app adds accounts, cross-device
@@ -640,6 +641,40 @@ window.__scribeState = (recording) => {
 };
 
 window.__scribeError = (message) => alertBox('error', escapeHtml(String(message)));
+
+/**
+ * Loudness from the recorder, so the meter works in the app too.
+ *
+ * Without it there was no way to tell a working microphone from a silent one
+ * — the timer ran either way, which is exactly how a recording that captured
+ * nothing went unnoticed.
+ */
+let lastHeardAt = 0;
+window.__scribeLevel = (level, speaking) => {
+  const el = $('level');
+  if (!el) return;
+  el.style.width = Math.round(Math.max(0, Math.min(1, level)) * 100) + '%';
+  el.classList.toggle('on', Boolean(speaking));
+  if (level > 0.08) lastHeardAt = Date.now();
+};
+
+/** Says so when the microphone has been open but silent for a long time. */
+function watchForSilence() {
+  if (silenceWatch) clearInterval(silenceWatch);
+  lastHeardAt = Date.now();
+  let warned = false;
+  silenceWatch = setInterval(() => {
+    if (!nativeRecording) return;
+    if (!warned && Date.now() - lastHeardAt > 30000) {
+      warned = true;
+      alertBox('warn',
+        '<strong>Nothing has been heard for 30 seconds.</strong> The recording is still running, ' +
+        'but the microphone may be blocked or covered. Check the bar above moves when you speak.');
+    }
+    if (Date.now() - lastHeardAt < 5000) warned = false;
+  }, 5000);
+}
+let silenceWatch = null;
 
 /* ══════════════ browser speech recognition ══════════════
    Chrome and Edge ship a speech recogniser that costs nothing and needs no
@@ -1307,7 +1342,21 @@ function renderBacklog() {
     renderLive(); renderNotesHeader(); renderNotes(); renderBacklog(); show('notes');
   };
 }
+/** What the recorder has actually captured, as it happens. */
+function renderCapture() {
+  const el = $('capture');
+  if (!el) return;
+  if (!recordingNow() || !session) { el.textContent = ''; return; }
+  const n = session.segments.length;
+  const done = session.segments.filter((x) => x.status === 'done').length;
+  const failed = session.segments.filter((x) => x.status === 'failed').length;
+  el.textContent = n === 0
+    ? 'no audio captured yet'
+    : `${n} part${n === 1 ? '' : 's'} captured \u00b7 ${done} transcribed${failed ? ` \u00b7 ${failed} failed` : ''}`;
+}
+
 function renderLive() {
+  renderCapture();
   const host = $('live');
   const segs = session ? session.segments.filter((s) => s.status !== 'skipped') : [];
   const interimLine = interim
@@ -1588,6 +1637,7 @@ function beginNativeSession() {
   elapsed = 0; interim = '';
   enqueue(session);
   setRecordingChrome(true);
+  watchForSilence();
   $('pause').hidden = true;   // the service records straight through
   clock = { t0: Date.now(), pausedTotal: 0, pausedAt: 0, paused: false };
   tickTimer = setInterval(() => {
@@ -1600,6 +1650,7 @@ function beginNativeSession() {
 async function endNativeSession() {
   if (!nativeRecording) return;
   nativeRecording = false;
+  if (silenceWatch) { clearInterval(silenceWatch); silenceWatch = null; }
   clearInterval(tickTimer); tickTimer = null;
   if (clock) elapsed = Date.now() - clock.t0 - clock.pausedTotal;
   if (session) session.durationMs = elapsed;
@@ -1715,6 +1766,7 @@ async function startRecording() {
     if (clock.paused) return;
     elapsed = Date.now() - clock.t0 - clock.pausedTotal;
     $('timer').textContent = fmt(elapsed);
+    renderCapture();
   }, 250);
   renderLive(); renderNotesHeader(); renderBacklog();
   window.onbeforeunload = () => true;

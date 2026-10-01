@@ -80,19 +80,28 @@ class RecordingService : Service() {
         val minBuf = AudioRecord.getMinBufferSize(SAMPLE_RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT)
         if (minBuf <= 0) { notifyError("This device cannot record at 16 kHz."); return }
 
-        val recorder = try {
-            AudioRecord(
-                MediaRecorder.AudioSource.VOICE_RECOGNITION,
-                SAMPLE_RATE,
-                AudioFormat.CHANNEL_IN_MONO,
-                AudioFormat.ENCODING_PCM_16BIT,
-                maxOf(minBuf * 4, SAMPLE_RATE),  // ~1s of slack against scheduling hiccups
-            )
-        } catch (t: Throwable) { notifyError("Microphone unavailable: ${t.message}"); return }
-
-        if (recorder.state != AudioRecord.STATE_INITIALIZED) {
-            recorder.release(); notifyError("Microphone could not be opened."); return
+        // MIC first: VOICE_RECOGNITION is tuned for short commands and on some
+        // phones applies processing that leaves long-form speech very quiet.
+        val sources = intArrayOf(
+            MediaRecorder.AudioSource.MIC,
+            MediaRecorder.AudioSource.VOICE_RECOGNITION,
+            MediaRecorder.AudioSource.DEFAULT,
+        )
+        var recorder: AudioRecord? = null
+        for (source in sources) {
+            val candidate = try {
+                AudioRecord(
+                    source,
+                    SAMPLE_RATE,
+                    AudioFormat.CHANNEL_IN_MONO,
+                    AudioFormat.ENCODING_PCM_16BIT,
+                    maxOf(minBuf * 4, SAMPLE_RATE),  // ~1s of slack against scheduling hiccups
+                )
+            } catch (t: Throwable) { null }
+            if (candidate != null && candidate.state == AudioRecord.STATE_INITIALIZED) { recorder = candidate; break }
+            candidate?.release()
         }
+        if (recorder == null) { notifyError("The microphone could not be opened on this phone."); return }
 
         val block = ShortArray(SAMPLE_RATE / 10)             // 100 ms per read
         val segment = ShortArray(SAMPLE_RATE * MAX_SEG_SEC)  // worst-case segment
@@ -103,6 +112,7 @@ class RecordingService : Service() {
         var silenceMs = 0
         var speechMs = 0
         var sawSpeech = false
+        var levelTick = 0
 
         recorder.startRecording()
         vad.resetPeak()
@@ -112,7 +122,11 @@ class RecordingService : Service() {
                 val read = recorder.read(block, 0, block.size)
                 if (read <= 0) continue
 
-                vad.push(block, read)
+                val level = vad.push(block, read)
+                // Throttled: this crosses into the WebView, and the meter is
+                // only worth updating while someone is looking at it.
+                levelTick += 1
+                if (levelTick % 2 == 0) levelListener?.invoke(level, vad.speaking)
                 if (segLen + read <= segment.size) {
                     System.arraycopy(block, 0, segment, segLen, read)
                     segLen += read
@@ -128,12 +142,17 @@ class RecordingService : Service() {
                 val atCap = durMs >= MAX_SEG_SEC * 1000
 
                 if (atPause || atCap) {
-                    // A pause handed to Whisper comes back as an ellipsis or
-                    // invented filler, so require a real amount of speech. The
-                    // loudness escape hatch keeps a segment the detector
-                    // misjudged: losing part of a lecture costs far more than
-                    // one wasted upload.
-                    if (speechMs >= MIN_SPEECH_MS || vad.peak > Vad.AUDIBLE * 4) {
+                    // A cut at a pause only happens once speech was heard, so
+                    // it always goes. A cut at the length cap goes whenever
+                    // anything at all was audible.
+                    //
+                    // This deliberately errs towards sending. Requiring a
+                    // measured amount of speech, as this once did, meant that
+                    // a quiet room or a distant speaker produced a recording
+                    // that ran for an hour and emitted nothing — far worse
+                    // than a few wasted uploads, whose text is stripped to
+                    // nothing afterwards anyway.
+                    if (atPause || vad.peak > Vad.AUDIBLE) {
                         emit(index++, segStartMs, nowMs, segment, segLen)
                     }
                     segLen = 0; segStartMs = nowMs; silenceMs = 0; sawSpeech = false; speechMs = 0
@@ -143,7 +162,7 @@ class RecordingService : Service() {
 
             // Flush whatever the final partial segment holds.
             val nowMs = totalSamples * 1000 / SAMPLE_RATE
-            if (segLen > 0 && (speechMs >= MIN_SPEECH_MS || vad.peak > Vad.AUDIBLE * 4)) {
+            if (segLen > 0 && (sawSpeech || vad.peak > Vad.AUDIBLE)) {
                 emit(index, segStartMs, nowMs, segment, segLen)
             }
         } catch (t: Throwable) {
@@ -215,6 +234,9 @@ class RecordingService : Service() {
         /** Called on the capture thread as each segment lands. */
         @Volatile var listener: ((Segment) -> Unit)? = null
         @Volatile var errorListener: ((String) -> Unit)? = null
+
+        /** Current loudness, for the meter. Set only while the app is on screen. */
+        @Volatile var levelListener: ((Float, Boolean) -> Unit)? = null
 
         val isRunning: Boolean get() = instance?.running == true
 
