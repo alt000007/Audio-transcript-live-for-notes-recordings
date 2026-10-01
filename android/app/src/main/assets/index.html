@@ -166,7 +166,7 @@
         <label for="title">Title</label>
         <input id="title" class="input" placeholder="e.g. Organic chemistry — week 4">
       </div>
-      <div class="tiny faint mono" id="buildline" style="text-align:right">2026-09-30 16:38 UTC</div>
+      <div class="tiny faint mono" id="buildline" style="text-align:right">2026-10-01 04:54 UTC</div>
       <div class="field" style="border-top:1px solid var(--border);padding-top:14px">
         <label for="importfile">Or import a recording</label>
         <input id="importfile" class="input" type="file" multiple accept="audio/*,.m4a,.mp3,.wav,.aac,.ogg,.webm">
@@ -190,6 +190,13 @@
 
   <!-- ───────────── Notes ───────────── -->
   <section id="p-notes" hidden>
+    <div class="card" id="saved-card" hidden>
+      <div class="row spread" style="margin-bottom:8px">
+        <span class="tiny faint" style="text-transform:uppercase;letter-spacing:.06em">Your recordings</span>
+        <span class="tiny faint" id="saved-count"></span>
+      </div>
+      <div id="saved"></div>
+    </div>
     <div class="card">
       <div class="row">
         <div class="grow">
@@ -210,10 +217,6 @@
     <div id="notes-out"></div>
     <div id="tx-out" hidden></div>
 
-    <div class="card" id="saved-card" style="margin-top:22px" hidden>
-      <div class="tiny faint" style="text-transform:uppercase;letter-spacing:.06em;margin-bottom:6px">Saved on this device</div>
-      <div id="saved"></div>
-    </div>
   </section>
 
   <!-- ───────────── Settings ───────────── -->
@@ -265,7 +268,7 @@
       </div>
     </div>
     <div class="card small muted">
-      <div class="tiny faint mono" style="float:right">build 2026-09-30 16:38 UTC</div>
+      <div class="tiny faint mono" style="float:right">build 2026-10-01 04:54 UTC</div>
       <strong style="color:var(--text)">What this is.</strong>
       A single-file version of Scribe for trying the pipeline. It keeps one recording at a time
       plus a list of saved transcripts in this browser. The full app adds accounts, cross-device
@@ -291,6 +294,83 @@ const settings = {
   maxSeg: LS.get('maxSeg', 12000),
 };
 const MIN_SEG = 4000, SILENCE_HOLD = 550, TICK = 100, BITRATE = 20000;
+
+/* ══════════════ where recordings are kept ══════════════
+   IndexedDB, not localStorage. A two-hour lecture transcribes to roughly
+   175 KB of text and a four-hour one to twice that, so a term's worth runs
+   past the ~5 MB localStorage ceiling — and a localStorage write that does
+   not fit throws, which is how recordings can disappear without anything
+   being reported. IndexedDB has no comparable limit and surfaces failures.
+
+   Rows are keyed by a unique id rather than a timestamp: two recordings
+   imported in the same moment would otherwise collide and overwrite. */
+
+const STORE = (() => {
+  let opening = null;
+
+  function open() {
+    if (opening) return opening;
+    opening = new Promise((resolve, reject) => {
+      const req = indexedDB.open('scribe-db', 1);
+      req.onupgradeneeded = () => {
+        const db = req.result;
+        if (!db.objectStoreNames.contains('sessions')) db.createObjectStore('sessions', { keyPath: 'id' });
+      };
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => reject(req.error || new Error('Could not open storage.'));
+    });
+    return opening;
+  }
+
+  const run = (mode, make) => open().then((db) => new Promise((resolve, reject) => {
+    const tx = db.transaction('sessions', mode);
+    const req = make(tx.objectStore('sessions'));
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+    tx.onabort = () => reject(tx.error || new Error('Storage transaction aborted.'));
+  }));
+
+  return {
+    put: (row) => run('readwrite', (st) => st.put(row)),
+    all: () => run('readonly', (st) => st.getAll()).then((rows) => (rows || []).sort((a, b) => b.startedAt - a.startedAt)),
+    del: (id) => run('readwrite', (st) => st.delete(id)),
+  };
+})();
+
+/** Everything saved, kept in memory so rendering stays synchronous. */
+let savedRows = [];
+
+async function refreshSaved() {
+  try {
+    savedRows = await STORE.all();
+  } catch (e) {
+    savedRows = [];
+    alertBox('error', 'Could not read saved recordings from this device\u2019s storage.');
+  }
+  renderSaved();
+}
+
+/** Moves anything kept by an older build into the new store, once. */
+async function migrateFromLocalStorage() {
+  const old = LS.get('sessions', null);
+  if (!Array.isArray(old) || !old.length) return;
+  try {
+    for (const r of old) {
+      await STORE.put({
+        id: r.id || `migrated-${r.startedAt}-${Math.random().toString(36).slice(2, 8)}`,
+        title: r.title, startedAt: r.startedAt, durationMs: r.durationMs,
+        segments: r.segments || [], notes: r.notes || null, incomplete: false,
+      });
+    }
+    localStorage.removeItem('scribe.sessions');
+  } catch {
+    // Leave the old copy alone if the move fails; nothing is lost.
+  }
+}
+
+function rid() {
+  return (crypto.randomUUID ? crypto.randomUUID() : `s-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+}
 
 /* ══════════════ helpers ══════════════ */
 const $ = (id) => document.getElementById(id);
@@ -1045,7 +1125,7 @@ async function importRecording(file, onProgress) {
   if (!settings.key) throw new Error('Importing needs a Groq key. Add a free one under Settings — your browser cannot transcribe a file on its own.');
 
   const title = file.name.replace(/\.[^.]+$/, '') || 'Imported recording';
-  session = { title, startedAt: file.lastModified || Date.now(), durationMs: 0, segments: [], notes: null, engine: 'whisper' };
+  session = { id: rid(), title, startedAt: file.lastModified || Date.now(), durationMs: 0, segments: [], notes: null, engine: 'whisper' };
   const prompt = buildPrompt('');
 
   const push = (rows) => {
@@ -1350,36 +1430,145 @@ function toMarkdown() {
 /* ══════════════ saved sessions (text only) ══════════════ */
 function saveSession(s = session) {
   if (!s || !doneText(s)) return;
-  const all = LS.get('sessions', []);
-  const rowIndex = all.findIndex((r) => r.startedAt === s.startedAt);
+  if (!s.id) s.id = rid();
   const row = {
-    title: s.title, startedAt: s.startedAt, durationMs: s.durationMs,
+    id: s.id,
+    title: s.title,
+    startedAt: s.startedAt,
+    durationMs: s.durationMs,
     segments: s.segments.filter((x) => x.status === 'done').map((x) => ({ startMs: x.startMs, text: x.text })),
     notes: s.notes || null,
+    // Set when a long import ran out of quota part-way through, so the list
+    // can say the recording is not the whole lecture.
+    incomplete: Boolean(s.incomplete),
   };
-  if (rowIndex >= 0) all[rowIndex] = row; else all.unshift(row);
-  LS.set('sessions', all.slice(0, 40));
+  // Keep the in-memory copy in step immediately; the write is confirmed after.
+  const i = savedRows.findIndex((r) => r.id === row.id);
+  if (i >= 0) savedRows[i] = row; else savedRows.unshift(row);
   renderSaved();
+
+  STORE.put(row).catch(() => {
+    alertBox('error',
+      `<strong>&ldquo;${escapeHtml(s.title)}&rdquo; could not be saved to this device.</strong> ` +
+      'Copy the transcript now, before closing the app.');
+  });
+}
+
+async function deleteSaved(id) {
+  savedRows = savedRows.filter((r) => r.id !== id);
+  renderSaved();
+  try { await STORE.del(id); } catch { /* it is already gone from the list */ }
+}
+
+/** Rebuilds a viewable session from a stored row. */
+function openSaved(row) {
+  session = {
+    id: row.id, title: row.title, startedAt: row.startedAt, durationMs: row.durationMs,
+    notes: row.notes, incomplete: row.incomplete, engine: 'whisper',
+    segments: (row.segments || []).map((x, i) => ({ ...x, index: i, status: 'done', blob: null, attempts: 0, error: null })),
+  };
+  renderLive(); renderNotesHeader(); renderNotes(); renderSaved();
+  show('notes');
+}
+
+function transcriptOf(row) {
+  return (row.segments || []).map((x) => x.text).filter(Boolean).join(' ');
 }
 
 function renderSaved() {
-  const all = LS.get('sessions', []);
-  $('saved-card').hidden = all.length === 0;
-  $('saved').innerHTML = all.map((r, i) => `<div class="sess">
-      <div class="grow"><div class="t">${escapeHtml(r.title)}</div>
-        <div class="tiny faint">${new Date(r.startedAt).toLocaleString()} · <span class="mono">${fmt(r.durationMs)}</span>${r.notes ? ' · <span class="pill ok">Notes</span>' : ''}</div></div>
-      <button class="btn sm" data-open="${i}">Open</button>
-      <button class="btn sm danger" data-del="${i}">Delete</button>
-    </div>`).join('');
-  $('saved').querySelectorAll('[data-open]').forEach((b) => b.onclick = () => {
-    const r = LS.get('sessions', [])[+b.dataset.open];
-    session = { title: r.title, startedAt: r.startedAt, durationMs: r.durationMs, notes: r.notes,
-      segments: r.segments.map((s, i) => ({ ...s, index: i, status: 'done', blob: null })) };
-    renderLive(); renderNotesHeader(); renderNotes(); show('notes');
+  const host = $('saved');
+  const card = $('saved-card');
+  if (!host || !card) return;
+
+  // Recordings still being transcribed belong in the same list, so nothing
+  // the user is waiting on is invisible.
+  const live = draining
+    .filter((x) => pendingCount(x) > 0)
+    .map((x) => ({ id: x.id, title: x.title, startedAt: x.startedAt, durationMs: x.durationMs,
+                   working: pendingCount(x), notes: x.notes, segments: [] }));
+  const rows = [...live, ...savedRows.filter((r) => !live.some((l) => l.id === r.id))];
+
+  card.hidden = rows.length === 0;
+  const count = $('saved-count');
+  if (count) count.textContent = rows.length ? `${rows.length}` : '';
+  if (!rows.length) return;
+
+  host.innerHTML = rows.map((r, i) => {
+    const words = r.segments ? r.segments.reduce((n, x) => n + (x.text ? x.text.trim().split(/\s+/).length : 0), 0) : 0;
+    const bits = [
+      new Date(r.startedAt).toLocaleDateString([], { day: 'numeric', month: 'short' }),
+      r.durationMs ? fmt(r.durationMs) : '',
+      words ? `${words.toLocaleString()} words` : '',
+    ].filter(Boolean).join(' · ');
+    const tags =
+      (r.working ? `<span class="pill">${r.working} transcribing</span>` : '') +
+      (r.notes ? '<span class="pill ok">Notes</span>' : '') +
+      (r.incomplete ? '<span class="pill warn">Partial</span>' : '');
+    return `<div class="sess" style="align-items:flex-start;flex-wrap:wrap">
+      <button class="grow" data-open="${i}" style="text-align:left;background:none;border:0;padding:0;cursor:pointer;color:inherit;min-width:0">
+        <span class="t" style="display:block">${escapeHtml(r.title)}</span>
+        <span class="tiny faint" style="display:block">${bits}</span>
+        ${tags ? `<span class="row" style="gap:5px;margin-top:4px">${tags}</span>` : ''}
+      </button>
+      <span class="row" style="gap:6px;flex:none">
+        <button class="btn sm" data-copy="${i}" ${r.working ? 'disabled' : ''}>Copy</button>
+        <button class="btn sm danger" data-del="${i}" aria-label="Delete">&times;</button>
+      </span>
+    </div>`;
+  }).join('');
+
+  host.querySelectorAll('[data-open]').forEach((el) => {
+    el.onclick = () => {
+      const r = rows[+el.dataset.open];
+      // One still transcribing is a live object, not a stored row.
+      const liveOne = draining.find((x) => x.id === r.id);
+      if (liveOne) { session = liveOne; renderLive(); renderNotesHeader(); renderNotes(); show('notes'); }
+      else openSaved(r);
+    };
   });
-  $('saved').querySelectorAll('[data-del]').forEach((b) => b.onclick = () => {
-    const all2 = LS.get('sessions', []); all2.splice(+b.dataset.del, 1); LS.set('sessions', all2); renderSaved();
+
+  host.querySelectorAll('[data-copy]').forEach((el) => {
+    el.onclick = async () => {
+      const r = rows[+el.dataset.copy];
+      // Always with its title and date: a bare wall of text pasted into
+      // notes is hard to place later.
+      const text = notesToMarkdownRow(r);
+      if (!text) { alertBox('warn', 'That recording has no transcript yet.'); return; }
+      try {
+        await navigator.clipboard.writeText(text);
+        el.textContent = 'Copied';
+        setTimeout(() => { el.textContent = 'Copy'; }, 1600);
+      } catch {
+        alertBox('info', 'The clipboard is blocked here. Open the recording and use Download instead.');
+      }
+    };
   });
+
+  host.querySelectorAll('[data-del]').forEach((el) => {
+    el.onclick = () => {
+      const r = rows[+el.dataset.del];
+      if (!confirm(`Delete "${r.title}"? The transcript cannot be recovered.`)) return;
+      if (session && session.id === r.id) session = null;
+      void deleteSaved(r.id);
+      renderNotesHeader(); renderNotes();
+    };
+  });
+}
+
+/** Markdown for a stored row, without having to open it first. */
+function notesToMarkdownRow(r) {
+  const out = [`# ${r.title}`, '', `*${new Date(r.startedAt).toLocaleString()} · ${fmt(r.durationMs)}*`, ''];
+  if (r.notes) {
+    if (r.notes.summary) out.push('## Summary', '', r.notes.summary, '');
+    for (const t of r.notes.topics || []) {
+      out.push(`## ${t.heading}`, '', `*${fmt(t.startMs)}*`, '');
+      for (const b of t.bullets || []) out.push(`- ${b}`);
+      out.push('');
+    }
+  }
+  const tx = transcriptOf(r);
+  if (tx) out.push('---', '', '## Full transcript', '', tx, '');
+  return out.join('\n');
 }
 
 /* ══════════════ recording flow ══════════════ */
@@ -1392,6 +1581,7 @@ function beginNativeSession() {
   if (nativeRecording) return;
   nativeRecording = true;
   session = {
+    id: rid(),
     title: $('title').value.trim() || `Recording — ${new Date().toLocaleString([], { dateStyle: 'short', timeStyle: 'short' })}`,
     startedAt: Date.now(), durationMs: 0, segments: [], notes: null, engine: 'native',
   };
@@ -1456,6 +1646,7 @@ async function startRecording() {
   }
 
   session = {
+    id: rid(),
     title: $('title').value.trim() || `Recording — ${new Date().toLocaleString([], { dateStyle: 'short', timeStyle: 'short' })}`,
     startedAt: Date.now(), durationMs: 0, segments: [], notes: null, engine,
   };
@@ -1619,7 +1810,7 @@ async function runImportBatch(items) {
 
   const many = files.length > 1;
   const failures = [];
-  let done = 0, quotaWait = 0, remaining = 0;
+  let done = 0, quotaWait = 0, remaining = 0, cutShort = null;
   // An import assigns the visible session before it can fail, so a failure
   // would otherwise leave an empty one on screen and make the summary think
   // nothing came through.
@@ -1648,9 +1839,19 @@ async function runImportBatch(items) {
     } catch (err) {
       const who = item instanceof File ? item.name : (item.name || 'a file');
       if (err instanceof QuotaExhausted) {
+        // A four-hour lecture is many uploads and will often run out of
+        // allowance part-way. Keep whatever was transcribed rather than
+        // throwing away an hour of work.
+        if (session && doneText(session)) {
+          session.incomplete = true;
+          saveSession(session);
+          lastGood = session;
+          done++;
+          cutShort = who;   // this one was saved, but only part of it
+        }
         // Every remaining file would fail the same way. Say it once.
         quotaWait = err.waitMs;
-        remaining = files.length - i;
+        remaining = files.length - i - (cutShort ? 1 : 0);
         break;
       }
       // One bad file must not take the rest of the batch with it.
@@ -1677,10 +1878,14 @@ async function runImportBatch(items) {
   // Last, so it is the message left on screen: it is the one that says what
   // to do next.
   if (quotaWait) {
+    const parts = [];
+    if (cutShort) parts.push(`&ldquo;${escapeHtml(cutShort)}&rdquo; was transcribed as far as the allowance went and saved, marked <em>Partial</em>`);
+    if (remaining > 0) parts.push(`${remaining} file${remaining === 1 ? '' : 's'} not started`);
+    if (done - (cutShort ? 1 : 0) > 0) parts.push(`${done - (cutShort ? 1 : 0)} finished`);
     alertBox('warn',
-      `<strong>Groq's free allowance is used up.</strong> ${done} of ${files.length} imported; ` +
-      `${remaining} left to do. It frees up in about ${humanWait(quotaWait)} \u2014 ` +
-      `import the rest after that. Nothing already transcribed is lost.`);
+      `<strong>Groq's free allowance is used up.</strong> It frees up in about ${humanWait(quotaWait)}. ` +
+      `<div class="tiny" style="margin-top:4px">${parts.join('. ')}. Nothing transcribed is lost \u2014 ` +
+      `import again after that and the rest will go through.</div>`);
   }
 }
 
@@ -1694,6 +1899,7 @@ async function runImportBatch(items) {
 async function importParts(name, parts, progress) {
   if (!settings.key) throw new Error('needs a Groq key — add one under Settings');
   session = {
+    id: rid(),
     title: name.replace(/\.[^.]+$/, '') || 'Imported recording',
     startedAt: Date.now(), durationMs: 0, segments: [], notes: null, engine: 'whisper',
   };
@@ -1936,7 +2142,10 @@ $('maxseg').oninput = (e) => { settings.maxSeg = +e.target.value; LS.set('maxSeg
       '<strong>Share \u203a Scribe</strong>.';
   }
   renderEngineHint();
-  renderLive(); renderNotes(); renderSaved(); renderBacklog();
+  renderLive(); renderNotes(); renderBacklog();
+  // Recordings live in IndexedDB now; bring across anything an older build
+  // left in localStorage before listing them.
+  migrateFromLocalStorage().then(refreshSaved);
 })();
 </script>
 </body>
