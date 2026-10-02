@@ -275,6 +275,18 @@
       plus a list of saved transcripts in this browser. The full app adds accounts, cross-device
       sync and a proper library.
     </div>
+
+    <div class="card stack" id="diag-card" hidden>
+      <div class="row spread">
+        <strong style="font-size:15px">Diagnostics</strong>
+        <span class="row" style="gap:6px">
+          <button class="btn sm" id="diag-refresh">Refresh</button>
+          <button class="btn sm" id="diag-copy">Copy</button>
+        </span>
+      </div>
+      <div class="tiny muted">What the app itself recorded doing. Worth sending when something looks like it did nothing at all.</div>
+      <div id="diag-out" class="tiny mono" style="white-space:pre-wrap;word-break:break-word;max-height:320px;overflow:auto;background:var(--bg);border:1px solid var(--border);border-radius:9px;padding:10px"></div>
+    </div>
   </section>
 </div>
 
@@ -2159,6 +2171,44 @@ $('maxseg-v').textContent = Math.round(settings.maxSeg / 1000);
 $('maxseg').oninput = (e) => { settings.maxSeg = +e.target.value; LS.set('maxSeg', settings.maxSeg);
   $('maxseg-v').textContent = Math.round(settings.maxSeg / 1000); };
 
+/* ══════════════ diagnostics ══════════════ */
+
+/**
+ * Reads the native side's own account of what happened.
+ *
+ * The page can be inspected from a laptop; the service and the intent
+ * plumbing cannot, so "it did nothing" has been impossible to tell apart
+ * from "the microphone never opened" or "parts were produced but never
+ * arrived". This answers that in one screenshot.
+ */
+function readDiagnostics() {
+  const out = $('diag-out');
+  if (!out) return;
+  if (!NATIVE || typeof window.ScribeNative.diagnostics !== 'function') {
+    out.textContent = 'Only available in the app.';
+    return;
+  }
+  try {
+    const d = JSON.parse(window.ScribeNative.diagnostics());
+    out.textContent = [
+      `service running   ${d.serviceRunning}`,
+      `audio source      ${d.audioSource}`,
+      `mic permission    ${d.micPermission}`,
+      `audio permission  ${d.mediaPermission}`,
+      `level samples     ${d.levelSamples}  (last ${d.lastLevel})`,
+      `parts captured    ${d.segmentsEmitted}  delivered ${d.segmentsDelivered}`,
+      `page ready        ${d.pageReady}   shares waiting ${d.pendingShare}`,
+      `files in transit  ${d.importsDir}`,
+      `transcriber       ${activeEngine()}   key ${settings.key ? 'set' : 'MISSING'}`,
+      `saved recordings  ${savedRows.length}`,
+      '',
+      ...(d.events || []).map((e) => `${(e.t / 1000).toFixed(1).padStart(7)}s  ${String(e.what).padEnd(8)} ${e.detail}`),
+    ].join('\n');
+  } catch (e) {
+    out.textContent = 'Could not read diagnostics: ' + e.message;
+  }
+}
+
 /* ══════════════ boot ══════════════ */
 (function boot() {
   if (!window.isSecureContext) {
@@ -2185,6 +2235,17 @@ $('maxseg').oninput = (e) => { settings.maxSeg = +e.target.value; LS.set('maxSeg
       '<strong>Edge</strong>, or add a free Groq key under Settings to use Whisper instead.', false);
   }
   if (NATIVE) {
+    $('diag-card').hidden = false;
+    $('diag-refresh').onclick = readDiagnostics;
+    $('diag-copy').onclick = async () => {
+      readDiagnostics();
+      try {
+        await navigator.clipboard.writeText($('diag-out').textContent || '');
+        $('diag-copy').textContent = 'Copied';
+        setTimeout(() => { $('diag-copy').textContent = 'Copy'; }, 1600);
+      } catch { alertBox('info', 'Clipboard blocked \u2014 read the panel instead.'); }
+    };
+    readDiagnostics();
     $('importfile').hidden = true;
     $('importnative').hidden = false;
     $('importbrowse').hidden = false;

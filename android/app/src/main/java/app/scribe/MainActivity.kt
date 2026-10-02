@@ -116,6 +116,7 @@ class MainActivity : AppCompatActivity() {
 
                 override fun onPageFinished(view: WebView, url: String) {
                     pageReady = true
+                    Diag.log("page", "loaded, pendingShare=${pendingShare.size}")
                     // A share can arrive before there is anything to hand it to.
                     if (pendingShare.isNotEmpty()) {
                         val queued = pendingShare
@@ -198,6 +199,7 @@ class MainActivity : AppCompatActivity() {
             Intent.ACTION_VIEW -> listOfNotNull(intent.data)
             else -> emptyList()
         }
+        Diag.log("share", "${intent?.action} -> ${uris.size} uri(s), pageReady=$pageReady")
         if (uris.isEmpty()) return
 
         if (pageReady) copyIn(uris) else pendingShare = uris
@@ -212,6 +214,13 @@ class MainActivity : AppCompatActivity() {
         }
         // Anything captured while the activity was gone.
         RecordingService.drainPending().forEach { deliver(it) }
+        // Belt and braces: if a share landed while the page was mid-load, the
+        // page-finished hook may already have run without it.
+        if (pageReady && pendingShare.isNotEmpty()) {
+            val queued = pendingShare
+            pendingShare = emptyList()
+            copyIn(queued)
+        }
         toJs("window.__scribeState && window.__scribeState(${RecordingService.isRunning})")
     }
 
@@ -242,6 +251,7 @@ class MainActivity : AppCompatActivity() {
         val bytes = runCatching { seg.file.readBytes() }.getOrNull() ?: return
         val b64 = Base64.encodeToString(bytes, Base64.NO_WRAP)
         seg.file.delete()
+        Diag.segmentsDelivered++
         runOnUiThread {
             toJs("window.__scribeSegment && window.__scribeSegment(${seg.index}, ${seg.startMs}, ${seg.endMs}, ${json(b64)})")
         }
@@ -358,6 +368,7 @@ class MainActivity : AppCompatActivity() {
                 out.put(entry)
             }
 
+            Diag.log("copyIn", "${uris.size} in, ${out.length()} ready")
             runOnUiThread {
                 if (out.length() == 0) {
                     toJs("window.__scribeError && window.__scribeError(${json("Those files could not be read.")})")
@@ -473,6 +484,18 @@ class MainActivity : AppCompatActivity() {
             val safe = File(imports, File(name).name)
             if (safe.parentFile == imports) safe.delete()
         }
+
+        /** Everything the native side knows about this session, as JSON. */
+        @JavascriptInterface
+        fun diagnostics(): String = Diag.snapshot(
+            mapOf(
+                "micPermission" to hasMic(),
+                "mediaPermission" to hasMediaAccess(),
+                "pageReady" to pageReady,
+                "pendingShare" to pendingShare.size,
+                "importsDir" to (if (::imports.isInitialized) imports.listFiles()?.size ?: 0 else -1),
+            ),
+        )
 
         @JavascriptInterface
         fun stopRecording() {

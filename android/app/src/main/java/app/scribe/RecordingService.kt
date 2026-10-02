@@ -55,6 +55,7 @@ class RecordingService : Service() {
 
     private fun startCapture() {
         if (running) return
+        Diag.log("service", "startCapture")
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             startForeground(NOTIFICATION_ID, buildNotification(), ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE)
         } else {
@@ -66,6 +67,7 @@ class RecordingService : Service() {
     }
 
     private fun stopCapture() {
+        if (running) Diag.log("service", "stopCapture")
         running = false
         worker?.join(2_000)
         worker = null
@@ -101,7 +103,16 @@ class RecordingService : Service() {
             if (candidate != null && candidate.state == AudioRecord.STATE_INITIALIZED) { recorder = candidate; break }
             candidate?.release()
         }
-        if (recorder == null) { notifyError("The microphone could not be opened on this phone."); return }
+        if (recorder == null) {
+            Diag.log("capture", "no audio source would open")
+            notifyError("The microphone could not be opened on this phone."); return
+        }
+        Diag.audioSource = when (recorder.audioSource) {
+            MediaRecorder.AudioSource.MIC -> "MIC"
+            MediaRecorder.AudioSource.VOICE_RECOGNITION -> "VOICE_RECOGNITION"
+            else -> "DEFAULT"
+        }
+        Diag.log("capture", "started on ${Diag.audioSource}")
 
         val block = ShortArray(SAMPLE_RATE / 10)             // 100 ms per read
         val segment = ShortArray(SAMPLE_RATE * MAX_SEG_SEC)  // worst-case segment
@@ -126,7 +137,11 @@ class RecordingService : Service() {
                 // Throttled: this crosses into the WebView, and the meter is
                 // only worth updating while someone is looking at it.
                 levelTick += 1
-                if (levelTick % 2 == 0) levelListener?.invoke(level, vad.speaking)
+                if (levelTick % 2 == 0) {
+                    Diag.levelSamples++
+                    Diag.lastLevel = level
+                    levelListener?.invoke(level, vad.speaking)
+                }
                 if (segLen + read <= segment.size) {
                     System.arraycopy(block, 0, segment, segLen, read)
                     segLen += read
@@ -181,11 +196,14 @@ class RecordingService : Service() {
             return
         }
         val seg = Segment(index, startMs, endMs, file)
+        Diag.segmentsEmitted++
+        Diag.log("segment", "#$index ${file.length()} bytes, listener=${listener != null}")
         pending.add(seg)
         listener?.invoke(seg)
     }
 
     private fun notifyError(message: String) {
+        Diag.log("error", message)
         errorListener?.invoke(message)
     }
 
