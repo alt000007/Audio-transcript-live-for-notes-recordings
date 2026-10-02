@@ -209,6 +209,8 @@
         <button class="btn primary" id="gen" disabled>Generate notes</button>
         <button class="btn" id="copy" disabled>Copy Markdown</button>
         <button class="btn" id="dl" disabled>Download</button>
+        <button class="btn" id="edit" disabled>Edit transcript</button>
+        <button class="btn" id="aifix" disabled>Correct with AI</button>
       </div>
     </div>
     <div class="tabs" style="margin:16px 0 12px" role="group" aria-label="Notes or transcript">
@@ -217,6 +219,44 @@
     </div>
     <div id="notes-out"></div>
     <div id="tx-out" hidden></div>
+
+    <div class="card stack" id="editor" hidden>
+      <div class="row spread">
+        <strong style="font-size:15px">Editing the transcript</strong>
+        <span class="tiny faint">one line per part &mdash; timestamps are kept</span>
+      </div>
+      <textarea id="edit-text" class="textarea" style="min-height:300px;font-size:14.5px"></textarea>
+      <div class="row">
+        <button class="btn primary grow" id="edit-save">Save changes</button>
+        <button class="btn" id="edit-cancel">Cancel</button>
+      </div>
+    </div>
+
+    <div class="card stack" id="aipanel" hidden>
+      <strong style="font-size:15px">Correct with AI</strong>
+      <div class="tiny muted">
+        It fixes words the recogniser misheard and the punctuation, and changes nothing else.
+        Telling it what the recording is about makes a real difference to names and jargon.
+      </div>
+      <div class="field">
+        <label for="ai-context">What is this recording about? <span class="faint" style="font-weight:400">&mdash; optional</span></label>
+        <textarea id="ai-context" class="textarea" style="min-height:70px"
+          placeholder="e.g. A-level biology lecture on the Krebs cycle. The teacher is Dr. Okonkwo."></textarea>
+      </div>
+      <div class="row">
+        <button class="btn primary grow" id="ai-run">Correct it</button>
+        <button class="btn" id="ai-cancel">Cancel</button>
+      </div>
+      <div id="ai-status" class="row small muted" hidden><span class="spin"></span><span id="ai-msg"></span></div>
+      <div id="ai-review" hidden class="stack">
+        <div class="tiny faint" id="ai-summary"></div>
+        <div id="ai-preview" class="small" style="max-height:260px;overflow:auto;background:var(--bg);border:1px solid var(--border);border-radius:9px;padding:10px"></div>
+        <div class="row">
+          <button class="btn primary grow" id="ai-accept">Use this</button>
+          <button class="btn" id="ai-reject">Keep the original</button>
+        </div>
+      </div>
+    </div>
 
   </section>
 
@@ -654,6 +694,17 @@ window.__scribeState = (recording) => {
 
 window.__scribeError = (message) => alertBox('error', escapeHtml(String(message)));
 
+/** The app has accepted a share and is about to read it. */
+window.__scribeShareIncoming = (names, count) => {
+  const status = $('importstatus'), msg = $('importmsg');
+  if (status && msg) {
+    status.hidden = false;
+    msg.textContent = count > 1 ? `Reading ${count} shared files…` : `Reading ${names}…`;
+  }
+  show('rec');
+  alertBox('info', `Received <strong>${escapeHtml(String(names))}</strong> — transcribing it now.`);
+};
+
 /**
  * Loudness from the recorder, so the meter works in the app too.
  *
@@ -975,6 +1026,28 @@ Each topic carries "startMs", copied from the [t=NNNN] marker nearest the start 
 Reply with JSON only:
 {"summary":"2-3 sentences","topics":[{"heading":"...","startMs":0,"bullets":["..."]}],"corrections":[{"from":"...","to":"..."}]}`;
 
+/**
+ * Chat models for the notes pass, best first.
+ *
+ * Groq retires models on its own schedule — llama-3.3-70b-versatile was
+ * decommissioned in August 2026 and every notes run started failing with a
+ * 404. Carrying a list and stepping down it means that happening again costs
+ * one retry rather than a broken app, and the one that worked is remembered.
+ */
+const NOTES_MODELS = ['openai/gpt-oss-120b', 'openai/gpt-oss-20b', 'llama-3.3-70b-versatile'];
+
+function notesModel() {
+  const saved = LS.get('notesModel', '');
+  return NOTES_MODELS.includes(saved) ? saved : NOTES_MODELS[0];
+}
+
+/** Moves to the next model when the current one no longer exists. */
+function dropNotesModel(which) {
+  const next = NOTES_MODELS[NOTES_MODELS.indexOf(which) + 1];
+  if (next) LS.set('notesModel', next);
+  return next;
+}
+
 const NOTES_PROMPT_HEADER =
   'Below is an automatic transcript of a lecture, with [t=ms] timestamps. ' +
   'Clean up the transcription and organise it into topic-grouped notes with a short summary. ' +
@@ -984,7 +1057,7 @@ const NOTES_PROMPT_HEADER =
 
 async function structure(chunks) {
   const body = {
-    model: 'llama-3.3-70b-versatile',
+    model: notesModel(),
     temperature: 0.2,
     response_format: { type: 'json_object' },
     messages: [
@@ -994,16 +1067,31 @@ async function structure(chunks) {
     ],
   };
   let res;
-  try {
-    res = await groq('chat/completions', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
-    });
-  } catch {
-    throw new Error(navigator.onLine
-      ? 'The browser blocked the call to Groq, so notes cannot be generated here. Use Copy notes prompt and paste it into an assistant instead.'
-      : 'You are offline. Reconnect and try again.');
+  for (;;) {
+    try {
+      res = await withRateLimitRetry(
+        () => groq('chat/completions', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+        }),
+        signal,
+      );
+    } catch (e) {
+      if (e instanceof QuotaExhausted) throw e;
+      throw new Error(navigator.onLine
+        ? 'The browser blocked the call to Groq, so notes cannot be generated here. Use Copy notes prompt and paste it into an assistant instead.'
+        : 'You are offline. Reconnect and try again.');
+    }
+    if (res.ok) break;
+
+    const text = await res.text().catch(() => '');
+    // A retired model: step to the next one and try again before giving up.
+    if (res.status === 404 && /model/i.test(text)) {
+      const next = dropNotesModel(body.model);
+      if (next) { body.model = next; continue; }
+      throw new Error('None of the known notes models are available on this Groq account. The app needs updating.');
+    }
+    throw new Error(`Could not generate notes (${res.status}). ${readableError(text)}`);
   }
-  if (!res.ok) throw new Error(`Could not generate notes (${res.status}). ${readableError(await res.text().catch(() => ''))}`);
   const content = (await res.json()).choices?.[0]?.message?.content;
   if (!content) throw new Error('The notes model returned an empty response.');
   const raw = JSON.parse(content);
@@ -1433,6 +1521,8 @@ function renderNotesHeader() {
   $('gen').disabled = !ready;
   $('copy').disabled = !done.length;
   $('dl').disabled = !done.length;
+  $('edit').disabled = !done.length;
+  $('aifix').disabled = !done.length || !settings.key;
   $('gen').textContent = !settings.key ? 'Copy notes prompt'
     : session.notes ? 'Regenerate notes' : 'Generate notes';
 }
@@ -1523,6 +1613,7 @@ async function deleteSaved(id) {
 
 /** Rebuilds a viewable session from a stored row. */
 function openSaved(row) {
+  closePanels();
   session = {
     id: row.id, title: row.title, startedAt: row.startedAt, durationMs: row.durationMs,
     notes: row.notes, incomplete: row.incomplete, engine: 'whisper',
@@ -2101,6 +2192,98 @@ window.__scribeRecordings = (items) => {
 };
 $('pause').onclick = togglePause;
 
+/* ── editing and AI correction ── */
+
+function transcriptLines() {
+  return session ? session.segments.filter((x) => x.status === 'done' && x.text).map((x) => x.text) : [];
+}
+
+function closePanels() {
+  $('editor').hidden = true;
+  $('aipanel').hidden = true;
+  $('ai-review').hidden = true;
+  $('ai-status').hidden = true;
+}
+
+$('edit').onclick = () => {
+  if (!session) return;
+  const open = !$('editor').hidden;
+  closePanels();
+  if (open) return;
+  $('edit-text').value = transcriptLines().join('\n');
+  $('editor').hidden = false;
+  $('v-tx').click();
+  $('editor').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+};
+
+$('edit-cancel').onclick = closePanels;
+
+$('edit-save').onclick = () => {
+  const lines = $('edit-text').value.split('\n').map((l) => l.trim()).filter(Boolean);
+  if (!lines.length) { alertBox('warn', 'An empty transcript would replace what is there. Nothing saved.'); return; }
+  applyEditedLines(lines);
+  closePanels();
+  alertBox('info', 'Transcript saved.');
+};
+
+let aiResult = null;
+
+$('aifix').onclick = () => {
+  if (!session) return;
+  const open = !$('aipanel').hidden;
+  closePanels();
+  if (open) return;
+  aiResult = null;
+  $('aipanel').hidden = false;
+  $('v-tx').click();
+  $('aipanel').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+};
+
+$('ai-cancel').onclick = closePanels;
+$('ai-reject').onclick = () => { aiResult = null; closePanels(); };
+
+$('ai-run').onclick = async () => {
+  const lines = transcriptLines();
+  if (!lines.length) { alertBox('warn', 'There is no transcript to correct.'); return; }
+  if (!settings.key) { alertBox('warn', 'Correcting needs a Groq key. Add one under Settings.'); return; }
+
+  $('ai-status').hidden = false;
+  $('ai-review').hidden = true;
+  $('ai-run').disabled = true;
+  const say = (t) => { $('ai-msg').textContent = t; };
+  say(`Reading ${lines.length} lines…`);
+  try {
+    aiResult = await correctTranscript(lines, $('ai-context').value.trim(), say);
+    const changed = aiResult.lines.filter((l, i) => l !== lines[i]).length;
+    $('ai-summary').textContent = changed
+      ? `${changed} of ${lines.length} lines changed${aiResult.corrections.length ? `, ${aiResult.corrections.length} terms fixed` : ''}.`
+      : 'Nothing needed changing.';
+    // Show what actually differs, not the whole transcript again.
+    $('ai-preview').innerHTML = changed
+      ? aiResult.lines.map((l, i) => (l === lines[i] ? '' :
+          `<div style="margin-bottom:8px"><div class="tiny faint" style="text-decoration:line-through">${escapeHtml(lines[i])}</div>
+           <div>${escapeHtml(l)}</div></div>`)).join('')
+      : '<div class="faint">No differences.</div>';
+    $('ai-review').hidden = false;
+  } catch (e) {
+    alertBox('error', escapeHtml(e instanceof QuotaExhausted
+      ? `Groq's free allowance is used up. It frees up in about ${humanWait(e.waitMs)}.`
+      : e.message));
+  } finally {
+    $('ai-status').hidden = true;
+    $('ai-run').disabled = false;
+  }
+};
+
+$('ai-accept').onclick = () => {
+  if (!aiResult) return;
+  applyEditedLines(aiResult.lines);
+  const n = aiResult.corrections.length;
+  aiResult = null;
+  closePanels();
+  alertBox('info', `Transcript corrected${n ? ` — ${n} term${n === 1 ? '' : 's'} fixed` : ''}.`);
+};
+
 $('gen').onclick = async () => {
   // The notes pass needs a model. Without a key, hand the user a prompt they
   // can paste into any assistant rather than leaving the button dead.
@@ -2170,6 +2353,106 @@ $('maxseg').value = settings.maxSeg;
 $('maxseg-v').textContent = Math.round(settings.maxSeg / 1000);
 $('maxseg').oninput = (e) => { settings.maxSeg = +e.target.value; LS.set('maxSeg', settings.maxSeg);
   $('maxseg-v').textContent = Math.round(settings.maxSeg / 1000); };
+
+/* ══════════════ editing the transcript ══════════════ */
+
+/**
+ * Corrects a transcript without rewriting it.
+ *
+ * Deliberately narrower than the notes pass: that one reorganises, this one
+ * only repairs what the recogniser got wrong. Context the user supplies is
+ * what makes names and jargon come out right — a model that knows the
+ * recording is a biology lecture stops turning "Krebs" into "crabs".
+ */
+const CORRECT_SYSTEM = `You repair automatic speech-recognition output.
+
+ONLY these changes are allowed:
+- Fix words the recogniser clearly misheard, using context and the subject given.
+- Fix punctuation, sentence breaks and capitalisation.
+- Remove filler and stutter: "um", "uh", false starts, words repeated by the recogniser.
+
+NEVER:
+- Add, remove or reorder any content the speaker actually said.
+- Summarise, shorten, explain or tidy the speaker's argument.
+- Invent anything to fill a gap. Leave [unclear] where it is beyond repair.
+- Write an ellipsis to mark a pause.
+
+You are given numbered lines. Return the SAME number of lines, in the same order,
+each with the same number. Change only the words.
+
+Reply with JSON only:
+{"lines":[{"i":0,"text":"..."}],"corrections":[{"from":"...","to":"..."}]}`;
+
+async function correctTranscript(lines, context, onWait) {
+  const body = {
+    model: notesModel(),
+    temperature: 0.1,
+    response_format: { type: 'json_object' },
+    messages: [
+      { role: 'system', content: CORRECT_SYSTEM },
+      {
+        role: 'user',
+        content: (context ? `What this recording is: ${context}\n\n` : '') +
+          (settings.glossary.trim() ? `Terms that appear: ${settings.glossary.trim().replace(/\s*\n\s*/g, ', ')}\n\n` : '') +
+          'Lines:\n' + lines.map((t, i) => `${i}| ${t}`).join('\n'),
+      },
+    ],
+  };
+
+  let res;
+  for (;;) {
+    res = await withRateLimitRetry(
+      () => groq('chat/completions', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }),
+      onWait,
+    );
+    if (res.ok) break;
+    const text = await res.text().catch(() => '');
+    if (res.status === 404 && /model/i.test(text)) {
+      const next = dropNotesModel(body.model);
+      if (next) { body.model = next; continue; }
+    }
+    throw new Error(`Could not correct the transcript (${res.status}). ${readableError(text)}`);
+  }
+
+  const content = (await res.json()).choices?.[0]?.message?.content;
+  if (!content) throw new Error('The model returned nothing.');
+  const parsed = JSON.parse(content);
+  const out = lines.slice();
+  for (const row of parsed.lines || []) {
+    const i = Number(row.i);
+    // Only accept lines it was actually given; never let it add or drop any.
+    if (Number.isInteger(i) && i >= 0 && i < out.length && typeof row.text === 'string' && row.text.trim()) {
+      out[i] = tidyTranscript(row.text) || out[i];
+    }
+  }
+  const corrections = (parsed.corrections || [])
+    .map((c) => ({ from: String(c.from || '').trim(), to: String(c.to || '').trim() }))
+    .filter((c) => c.from && c.to && c.from !== c.to);
+  return { lines: out, corrections };
+}
+
+/** Writes edited lines back onto the session, keeping each line's timestamp. */
+function applyEditedLines(lines) {
+  const done = session.segments.filter((x) => x.status === 'done');
+  const next = [];
+  for (let i = 0; i < lines.length; i++) {
+    const text = lines[i].trim();
+    if (!text) continue;
+    const from = done[Math.min(i, done.length - 1)];
+    next.push({
+      index: next.length,
+      // Lines beyond the original count inherit the last known time rather
+      // than pretending to a precision that is not there.
+      startMs: from ? from.startMs : 0,
+      endMs: from ? from.endMs : 0,
+      text, status: 'done', blob: null, attempts: 0, error: null,
+    });
+  }
+  session.segments = next;
+  session.edited = true;
+  saveSession();
+  renderLive(); renderNotesHeader(); renderTranscriptTab();
+}
 
 /* ══════════════ diagnostics ══════════════ */
 

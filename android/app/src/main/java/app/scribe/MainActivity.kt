@@ -202,6 +202,12 @@ class MainActivity : AppCompatActivity() {
         Diag.log("share", "${intent?.action} -> ${uris.size} uri(s), pageReady=$pageReady")
         if (uris.isEmpty()) return
 
+        // Say so immediately. A share that fails somewhere in the copy showed
+        // nothing at all before, which is indistinguishable from the app never
+        // having received it.
+        val names = uris.joinToString(", ") { displayName(it) }
+        toJs("window.__scribeShareIncoming && window.__scribeShareIncoming(${json(names)}, ${uris.size})")
+
         if (pageReady) copyIn(uris) else pendingShare = uris
     }
 
@@ -371,8 +377,17 @@ class MainActivity : AppCompatActivity() {
             Diag.log("copyIn", "${uris.size} in, ${out.length()} ready")
             runOnUiThread {
                 if (out.length() == 0) {
-                    toJs("window.__scribeError && window.__scribeError(${json("Those files could not be read.")})")
+                    toJs(
+                        "window.__scribeError && window.__scribeError(" +
+                            json("Could not read ${uris.size} shared file(s). The app may not have been granted access to them.") + ")",
+                    )
                 } else {
+                    if (out.length() < uris.size) {
+                        toJs(
+                            "window.__scribeError && window.__scribeError(" +
+                                json("${uris.size - out.length()} of ${uris.size} shared files could not be read.") + ")",
+                        )
+                    }
                     toJs("window.__scribeFilesPicked && window.__scribeFilesPicked($out)")
                 }
             }
