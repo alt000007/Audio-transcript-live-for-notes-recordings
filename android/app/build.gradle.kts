@@ -11,8 +11,23 @@ android {
         applicationId = "app.scribe"
         minSdk = 26          // AudioRecord + MediaCodec paths below assume Oreo
         targetSdk = 35
-        versionCode = 1
-        versionName = "1.0"
+        versionCode = 2
+        versionName = "1.1"
+
+        // The on-device transcriber is native code. 64-bit ARM only: every
+        // phone that runs a current Android is, and each extra ABI adds
+        // megabytes and build time for nothing.
+        ndk { abiFilters += listOf("arm64-v8a") }
+        externalNativeBuild {
+            cmake { arguments += listOf("-DANDROID_STL=c++_static") }
+        }
+    }
+
+    externalNativeBuild {
+        cmake {
+            path = file("src/main/cpp/CMakeLists.txt")
+            version = "3.22.1"
+        }
     }
 
     signingConfigs {

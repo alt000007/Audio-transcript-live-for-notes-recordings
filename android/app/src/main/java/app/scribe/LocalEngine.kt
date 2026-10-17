@@ -142,9 +142,10 @@ class LocalEngine(private val context: Context) : Engine {
         }
         val threads = Runtime.getRuntime().availableProcessors().coerceIn(1, 4)
         val abort = AbortCheck(cancelled)
-        val raw = nativeTranscribe(handle, pcm.toArray(), lang.ifBlank { "auto" }, prompt, threads, abort)
+        val bytes = nativeTranscribe(handle, pcm.toArray(), lang.ifBlank { "auto" }, prompt, threads, abort)
             ?: if (cancelled()) return emptyList() else throw Fatal("The on-device engine failed on this part.")
-        return raw.lineSequence().mapNotNull { line ->
+        // Decoded leniently: a split multi-byte character becomes U+FFFD, not a crash.
+        return String(bytes, Charsets.UTF_8).lineSequence().mapNotNull { line ->
             val p = line.split('\t', limit = 3)
             if (p.size < 3) return@mapNotNull null
             val text = p[2].trim()
@@ -170,10 +171,10 @@ class LocalEngine(private val context: Context) : Engine {
 
     private external fun nativeInit(modelPath: String): Long
     private external fun nativeFree(handle: Long)
-    /** @return one line per segment: start and end in 10 ms units, then text, tab-separated. */
+    /** @return UTF-8, one line per segment: start and end in 10 ms units, then text, tab-separated. */
     private external fun nativeTranscribe(
         handle: Long, pcm: FloatArray, lang: String, prompt: String, threads: Int, abort: AbortCheck,
-    ): String?
+    ): ByteArray?
 
     companion object {
         private const val BASE_URL = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/"
@@ -183,10 +184,29 @@ class LocalEngine(private val context: Context) : Engine {
             Model("small", "ggml-small-q5_1.bin", 190, "Small — slower, more accurate"),
         )
 
+        /**
+         * The library is built for ARMv8.2 with dot-product and half-precision
+         * instructions, which roughly doubles its speed. A phone without them
+         * would crash on the first instruction, so check the CPU first and
+         * simply go without the offline engine on one that lacks them.
+         */
         val libLoaded: Boolean by lazy {
+            if (!cpuSupported()) {
+                Diag.log("local", "CPU lacks dotprod/fp16; offline engine unavailable")
+                return@lazy false
+            }
             runCatching { System.loadLibrary("scribewhisper") }
                 .onFailure { Diag.log("local", "native library missing: ${it.message}") }
                 .isSuccess
+        }
+
+        private fun cpuSupported(): Boolean {
+            if (android.os.Build.SUPPORTED_ABIS.firstOrNull() != "arm64-v8a") return false
+            val features = runCatching {
+                File("/proc/cpuinfo").readLines().filter { it.startsWith("Features") }
+                    .flatMap { it.substringAfter(':').trim().split(Regex("\\s+")) }.toSet()
+            }.getOrDefault(emptySet())
+            return "asimddp" in features && ("asimdhp" in features || "fphp" in features)
         }
     }
 }
