@@ -9,6 +9,114 @@ network drops.
 
 ---
 
+## Android app: sharing files to transcribe
+
+Install: [latest APK](https://github.com/alt000007/Audio-transcript-live-for-notes-recordings/releases/latest-android).
+Builds are now all signed with the same key, so each new APK installs over the
+last and keeps everything. The first one after the old builds needs **one last
+uninstall** (they were each signed with a random key); copy anything you want
+to keep from the Notes tab first.
+
+### How the queue works
+
+1. Share one or many files to Scribe (or use *Choose a recording* / *Browse
+   recordings*). Each file becomes a job and appears at once in **Notes ›
+   Transcribing**. You can keep adding files while a batch runs.
+2. The file is **copied into the app straight away**, so the original can be
+   moved or deleted and nothing ever has to be shared twice. A fingerprint
+   (SHA-256) is taken during the copy; sharing the same file again opens the
+   existing transcript instead of doing it again.
+3. The audio is decoded, mixed to 16 kHz mono, long silences are shortened
+   (pauses over 0.8 s, with the times kept so timestamps still point at the
+   original), and cut into **5-minute parts** encoded as 32 kbps AAC.
+4. Parts transcribe **side by side** — by default 2 files at once and 3 parts
+   at once, front of the queue first — so the first file is readable long
+   before the last one starts.
+5. Each finished part is saved immediately; each finished file lands in **Your
+   recordings** straight away, where it can be opened, copied, shared,
+   downloaded, edited, corrected with AI or turned into notes. A running file
+   can be opened too, and its text grows as parts finish.
+6. Jobs can be cancelled, retried (only failed parts are redone) and moved up
+   or down. Statuses: *waiting* (with place in line), *working* (with
+   progress), *done* (with how long it took), *failed* (with the reason).
+
+It runs in a foreground service with a progress notification, so it carries on
+with the screen off or the app closed. Optional notifications for each finished
+file and for the whole batch (Settings). On Xiaomi phones, tap **Let Scribe work
+in the background** in Settings once, or the system may pause it anyway.
+
+If the app is closed, crashes, the phone reboots or the network drops, nothing
+is lost: open Scribe and unfinished files carry on from the last saved part.
+Rate limits and dropped connections are waits, never failures.
+
+### Where things are saved
+
+| What | Where |
+|---|---|
+| Copied audio, queue, job states, each part's text | `/data/data/app.scribe/files/jobs/` (app-private). `order.json` is the queue; `<job>/job.json` its state; `<job>/chunks/cN.json` each part's transcript; `<job>/result.json` the finished one. Every write goes to a temp file and is renamed over the old one. Audio copies are deleted once a file is done (unless *Keep the app's copy* is on). |
+| Your recordings, notes, edits | The app's IndexedDB (`scribe-db`), as before |
+| Groq key | Encrypted with a key held in the Android Keystore; never in plain text, never in the code. (Browser build: AES-GCM with a non-extractable WebCrypto key in IndexedDB.) |
+| Offline model | `Android/data/app.scribe/files/models/` |
+
+### Engines, cost and limits
+
+Settings › *Shared and imported files* › **Engine**:
+
+- **Automatic** (default): Groq's free plan, and the phone when Groq says to
+  wait more than 5 minutes (allowance used up) — if the offline model is
+  downloaded. Otherwise files just wait and resume on their own.
+- **Groq only**: `whisper-large-v3-turbo`, the same model as before, so
+  accuracy is unchanged. Free plan, no card: you cannot be charged. Limits
+  (third-party reports, October 2026 — check your own at
+  console.groq.com/settings/limits): about **20 requests/minute, 2,000/day,
+  7,200 audio-seconds/hour (2 h of audio per hour) and 28,800/day (8 h)**. The
+  app spaces requests to stay under the per-minute limit and waits out the
+  others, showing *Waiting for the rate limit — 12 min*.
+- **On this phone only**: whisper.cpp with the Small (190 MB) or Base (60 MB)
+  model, downloaded once from Settings. Free with no limits, offline, private.
+  But it is **noticeably less accurate** than Groq (especially in Italian and
+  on technical words), much slower — often slower than real time on a phone —
+  and heavy on battery. That is why it is a fallback, not the default.
+  Needs a 64-bit phone with ARMv8.2 (any phone running a current Android).
+
+### Speed: before and after
+
+Measured with the real queue code on a desktop with simulated network and Groq
+speed (`tests/queue-sim`, a 2 Mbit/s uplink, 128 kbps source files), not on a
+phone:
+
+| Batch | Before | After |
+|---|---|---|
+| 5 voice notes, 30 min total — whole batch | 2.2 min | 0.6 min |
+| 5 voice notes — first result readable | 0.3 min | 0.2 min |
+| 5 lectures, 320 min total — whole batch | 128 min* | 122 min |
+| 5 lectures — first result readable | 3.5 min | 1.0 min |
+
+\* Before, the batch stopped when the hourly allowance ran out and had to be
+shared again; the figure assumes you re-shared at exactly the right moment.
+For big batches the free plan's 2 hours of audio per hour is the ceiling
+whatever the app does; silence trimming stretches it by the amount removed
+(about a quarter in the test recording). Each job shows its own processing time
+and speed in the queue, so you can compare on your phone.
+
+### Judgment calls (defaults you can change)
+
+- Engine *Automatic*; 2 files and 3 parts at once; 5-minute parts.
+- Silence trimming on, conservative: only the middle of pauses longer than
+  0.8 s is removed, and only when the level is near the room's noise floor.
+- Notify when everything is done: on. Each file: off.
+- Audio copies deleted after transcription; the transcript is kept.
+- "Clear finished" hides done jobs from the queue but remembers their
+  fingerprints. Deleting a recording from *Your recordings* forgets it, so
+  sharing it again transcribes it again.
+- The signing key is in the repo (`android/signing`) so builds can update each
+  other. It is a sideload key for a personal app. To use a private one, add it
+  as the `SCRIBE_KEYSTORE_B64` and `SCRIBE_KEYSTORE_PASSWORD` Actions secrets.
+- The queue lives in the Android app. The browser version keeps its simpler
+  one-file-at-a-time importer (a web page cannot work in the background).
+
+---
+
 ## How it works
 
 ```

@@ -6,3 +6,6 @@ dev-dist
 *.log
 .DS_Store
 tsconfig.tsbuildinfo
+build/
+.gradle/
+.kotlin/
