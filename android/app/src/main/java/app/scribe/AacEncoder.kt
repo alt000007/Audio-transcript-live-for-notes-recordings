@@ -26,12 +26,12 @@ object AacEncoder {
     private const val TIMEOUT_US = 10_000L
 
     /** @return true when [out] holds a complete file. */
-    fun encode(pcm: ShortArray, length: Int, sampleRate: Int, out: File): Boolean {
+    fun encode(pcm: ShortArray, length: Int, sampleRate: Int, out: File, bitRate: Int = BIT_RATE): Boolean {
         if (length <= 0) return false
 
         val format = MediaFormat.createAudioFormat(MIME, sampleRate, 1).apply {
             setInteger(MediaFormat.KEY_AAC_PROFILE, MediaCodecInfo.CodecProfileLevel.AACObjectLC)
-            setInteger(MediaFormat.KEY_BIT_RATE, BIT_RATE)
+            setInteger(MediaFormat.KEY_BIT_RATE, bitRate)
             setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, 16384)
         }
 

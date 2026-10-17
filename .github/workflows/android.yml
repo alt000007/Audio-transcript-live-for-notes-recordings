@@ -36,8 +36,22 @@ jobs:
         with:
           gradle-version: "8.11.1"
 
+      # A private signing key, if one has been added as a secret. Without
+      # it the build uses the fixed key in android/signing, which is what
+      # lets each new APK install over the last without losing anything.
+      - name: Use the private signing key, if there is one
+        env:
+          KS: ${{ secrets.SCRIBE_KEYSTORE_B64 }}
+        run: |
+          if [ -n "$KS" ]; then
+            echo "$KS" | base64 -d > "$RUNNER_TEMP/scribe.jks"
+            echo "SCRIBE_KEYSTORE=$RUNNER_TEMP/scribe.jks" >> "$GITHUB_ENV"
+          fi
+
       - name: Build debug APK
         working-directory: android
+        env:
+          SCRIBE_KEYSTORE_PASSWORD: ${{ secrets.SCRIBE_KEYSTORE_PASSWORD }}
         run: gradle --no-daemon assembleDebug
 
       - name: Name the APK by commit

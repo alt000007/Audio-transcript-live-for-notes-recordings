@@ -9,8 +9,11 @@ import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
+import android.os.PowerManager
 import android.provider.MediaStore
-import android.provider.OpenableColumns
+import android.provider.Settings
 import android.util.Base64
 import android.webkit.JavascriptInterface
 import android.webkit.PermissionRequest
@@ -23,6 +26,7 @@ import android.webkit.WebViewClient
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
+import androidx.core.content.FileProvider
 import androidx.webkit.WebViewAssetLoader
 import org.json.JSONArray
 import org.json.JSONObject
@@ -45,12 +49,12 @@ class MainActivity : AppCompatActivity() {
 
     private lateinit var imports: File
 
-    /** Groq refuses audio over 25MB. */
-    private val UPLOAD_LIMIT = 24L * 1024 * 1024
-
-    /** Shares that arrived before the page was ready to receive them. */
-    private var pendingShare: List<Uri> = emptyList()
     private var pageReady = false
+    /** A notification asked to open a transcript before the page had loaded. */
+    private var pendingOpenJob: String? = null
+
+    private val ui = Handler(Looper.getMainLooper())
+    private var queuePushQueued = false
 
     /** The page's pending <input type="file">, waiting on the picker. */
     private var fileChooser: ValueCallback<Array<Uri>>? = null
@@ -59,7 +63,7 @@ class MainActivity : AppCompatActivity() {
     private val pickForBridge = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
         val uris = if (result.resultCode == RESULT_OK) urisFrom(result.data) else emptyList()
         if (uris.isEmpty()) toJs("window.__scribeFileCancelled && window.__scribeFileCancelled()")
-        else copyIn(uris)
+        else addToQueue(uris)
     }
 
     private val pickFile = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
@@ -95,6 +99,16 @@ class MainActivity : AppCompatActivity() {
 
         imports = File(cacheDir, "imports").apply { mkdirs() }
 
+        // The file queue lives on disk; load it and carry on with anything
+        // left unfinished by a crash, a reboot or the app being closed.
+        Queue.init(this)
+        Queue.pageListener = { pushQueue() }
+        Queue.duplicateListener = { name, existing ->
+            runOnUiThread {
+                toJs("window.__scribeDuplicate && window.__scribeDuplicate(${json(name)}, ${json(existing.id)}, ${json(existing.status)})")
+            }
+        }
+
         // A picked recording can be tens of megabytes. Handing that to the page
         // as base64 through the JavaScript bridge would mean holding several
         // copies in memory at once; serving it over the app's own origin lets
@@ -116,12 +130,11 @@ class MainActivity : AppCompatActivity() {
 
                 override fun onPageFinished(view: WebView, url: String) {
                     pageReady = true
-                    Diag.log("page", "loaded, pendingShare=${pendingShare.size}")
-                    // A share can arrive before there is anything to hand it to.
-                    if (pendingShare.isNotEmpty()) {
-                        val queued = pendingShare
-                        pendingShare = emptyList()
-                        copyIn(queued)
+                    Diag.log("page", "loaded")
+                    pushQueue()
+                    pendingOpenJob?.let { id ->
+                        pendingOpenJob = null
+                        toJs("window.__scribeOpenJob && window.__scribeOpenJob(${json(id)})")
                     }
                 }
             }
@@ -168,7 +181,10 @@ class MainActivity : AppCompatActivity() {
             askNotify.launch(Manifest.permission.POST_NOTIFICATIONS)
         }
 
-        handleShare(intent)
+        // A recreated activity is handed its original intent again; the share
+        // in it was already queued the first time round.
+        if (savedInstanceState == null) handleShare(intent)
+        Queue.resume(this)
 
         RecordingService.listener = { seg -> deliver(seg) }
         RecordingService.errorListener = { msg ->
@@ -186,6 +202,11 @@ class MainActivity : AppCompatActivity() {
 
     /** Picks the audio out of a share or an open request, if there is one. */
     private fun handleShare(intent: Intent?) {
+        if (intent?.action == TranscribeService.ACTION_OPEN) {
+            val id = intent.getStringExtra(TranscribeService.EXTRA_JOB) ?: return
+            if (pageReady) toJs("window.__scribeOpenJob && window.__scribeOpenJob(${json(id)})") else pendingOpenJob = id
+            return
+        }
         val uris: List<Uri> = when (intent?.action) {
             Intent.ACTION_SEND -> listOfNotNull(
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU)
@@ -201,14 +222,32 @@ class MainActivity : AppCompatActivity() {
         }
         Diag.log("share", "${intent?.action} -> ${uris.size} uri(s), pageReady=$pageReady")
         if (uris.isEmpty()) return
+        // A share is consumed once; a configuration change or a return to the
+        // app must not queue the same files again.
+        intent?.action = Intent.ACTION_MAIN
 
-        // Say so immediately. A share that fails somewhere in the copy showed
-        // nothing at all before, which is indistinguishable from the app never
-        // having received it.
-        val names = uris.joinToString(", ") { displayName(it) }
+        // Say so immediately, then copy. The queue does not need the page, so
+        // a share is never held back waiting for it to load.
+        val names = uris.joinToString(", ") { Queue.displayName(this, it) }
         toJs("window.__scribeShareIncoming && window.__scribeShareIncoming(${json(names)}, ${uris.size})")
+        addToQueue(uris)
+    }
 
-        if (pageReady) copyIn(uris) else pendingShare = uris
+    private fun addToQueue(uris: List<Uri>) {
+        Queue.addFiles(this, uris)
+        pushQueue()
+    }
+
+    /** Repaints the page's queue list, at most four times a second. */
+    private fun pushQueue() {
+        ui.post {
+            if (queuePushQueued) return@post
+            queuePushQueued = true
+            ui.postDelayed({
+                queuePushQueued = false
+                if (pageReady) toJs("window.__scribeQueue && window.__scribeQueue(${Queue.snapshot()})")
+            }, 250)
+        }
     }
 
     override fun onResume() {
@@ -220,13 +259,10 @@ class MainActivity : AppCompatActivity() {
         }
         // Anything captured while the activity was gone.
         RecordingService.drainPending().forEach { deliver(it) }
-        // Belt and braces: if a share landed while the page was mid-load, the
-        // page-finished hook may already have run without it.
-        if (pageReady && pendingShare.isNotEmpty()) {
-            val queued = pendingShare
-            pendingShare = emptyList()
-            copyIn(queued)
-        }
+        // Unfinished files carry on, and the list catches up with whatever
+        // happened while the app was away.
+        Queue.resume(this)
+        pushQueue()
         toJs("window.__scribeState && window.__scribeState(${RecordingService.isRunning})")
     }
 
@@ -236,6 +272,8 @@ class MainActivity : AppCompatActivity() {
     }
 
     override fun onDestroy() {
+        if (Queue.pageListener != null) Queue.pageListener = null
+        Queue.duplicateListener = null
         RecordingService.levelListener = null
         RecordingService.listener = null
         RecordingService.errorListener = null
@@ -297,103 +335,6 @@ class MainActivity : AppCompatActivity() {
         return false
     }
 
-    private fun displayName(uri: Uri): String {
-        runCatching {
-            contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { c ->
-                val i = c.getColumnIndex(OpenableColumns.DISPLAY_NAME)
-                if (i >= 0 && c.moveToFirst()) return c.getString(i) ?: "recording"
-            }
-        }
-        return uri.lastPathSegment?.substringAfterLast('/') ?: "recording"
-    }
-
-    /**
-     * Copies the pick into internal storage under a name of our own choosing —
-     * a display name is arbitrary text and has no business becoming a path —
-     * and hands the page a URL it can fetch.
-     */
-    /**
-     * Copies each pick into internal storage and hands the page a list of URLs
-     * it can fetch.
-     *
-     * Names are ours, not the file's: a display name is arbitrary text and has
-     * no business becoming a path. The original travels alongside, because
-     * Whisper infers the container from it. The copy runs off the main thread
-     * — a batch of lectures is hundreds of megabytes, and copying that where
-     * the UI runs would freeze the app long enough to be killed.
-     */
-    private fun copyIn(uris: List<Uri>) {
-        if (uris.isEmpty()) return
-        thread(isDaemon = true) {
-            // Anything left from a previous batch the page has finished with.
-            runCatching { imports.listFiles()?.forEach { it.delete() } }
-
-            val out = JSONArray()
-            uris.forEachIndexed { i, uri ->
-                val name = displayName(uri)
-                val ext = name.substringAfterLast('.', "")
-                    .takeIf { it.length in 1..5 && it.all(Char::isLetterOrDigit) } ?: "m4a"
-                val dest = File(imports, "pick-${System.currentTimeMillis()}-$i.$ext")
-                val ok = runCatching {
-                    contentResolver.openInputStream(uri)?.use { input ->
-                        dest.outputStream().use { output -> input.copyTo(output) }
-                    } ?: return@runCatching false
-                    dest.length() > 0
-                }.getOrDefault(false)
-
-                if (!ok) {
-                    dest.delete()
-                    return@forEachIndexed
-                }
-
-                val entry = JSONObject().put("name", name)
-                if (dest.length() > UPLOAD_LIMIT) {
-                    // Too big to send whole. Cut it here rather than in the
-                    // page: the browser has to decode the entire recording to
-                    // do it, which a long lecture will not survive.
-                    val parts = AudioSplitter.split(dest)
-                    dest.delete()
-                    if (parts.isEmpty()) {
-                        out.put(entry.put("error", "This recording could not be split into uploadable pieces."))
-                        return@forEachIndexed
-                    }
-                    val arr = JSONArray()
-                    parts.forEach { part ->
-                        arr.put(
-                            JSONObject()
-                                .put("url", "https://appassets.androidplatform.net/imports/${part.file.name}")
-                                .put("release", part.file.name)
-                                .put("offsetMs", part.startMs),
-                        )
-                    }
-                    entry.put("parts", arr)
-                } else {
-                    entry.put("url", "https://appassets.androidplatform.net/imports/${dest.name}")
-                    entry.put("release", dest.name)
-                }
-                out.put(entry)
-            }
-
-            Diag.log("copyIn", "${uris.size} in, ${out.length()} ready")
-            runOnUiThread {
-                if (out.length() == 0) {
-                    toJs(
-                        "window.__scribeError && window.__scribeError(" +
-                            json("Could not read ${uris.size} shared file(s). The app may not have been granted access to them.") + ")",
-                    )
-                } else {
-                    if (out.length() < uris.size) {
-                        toJs(
-                            "window.__scribeError && window.__scribeError(" +
-                                json("${uris.size - out.length()} of ${uris.size} shared files could not be read.") + ")",
-                        )
-                    }
-                    toJs("window.__scribeFilesPicked && window.__scribeFilesPicked($out)")
-                }
-            }
-        }
-    }
-
     private fun hasMediaAccess() =
         ContextCompat.checkSelfPermission(this, mediaPermission) == PackageManager.PERMISSION_GRANTED
 
@@ -431,6 +372,31 @@ class MainActivity : AppCompatActivity() {
             }
             runOnUiThread { toJs("window.__scribeRecordings && window.__scribeRecordings($out)") }
         }
+    }
+
+    private fun batteryUnrestricted(): Boolean =
+        (getSystemService(POWER_SERVICE) as PowerManager).isIgnoringBatteryOptimizations(packageName)
+
+    /**
+     * Shares a transcript. Short ones go as plain text; a long lecture is far
+     * past what an intent can carry, so it goes as a file instead.
+     */
+    private fun shareOut(title: String, text: String) {
+        val send = Intent(Intent.ACTION_SEND).putExtra(Intent.EXTRA_SUBJECT, title)
+        if (text.length < 60_000) {
+            send.type = "text/plain"
+            send.putExtra(Intent.EXTRA_TEXT, text)
+        } else {
+            val dir = File(cacheDir, "share").apply { mkdirs(); listFiles()?.forEach { it.delete() } }
+            val safe = title.filter { it.isLetterOrDigit() || it == ' ' || it == '-' }.trim().take(60).ifEmpty { "transcript" }
+            val f = File(dir, "$safe.md")
+            f.writeText(text)
+            send.type = "text/markdown"
+            send.putExtra(Intent.EXTRA_STREAM, FileProvider.getUriForFile(this, "$packageName.files", f))
+            send.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+        runCatching { startActivity(Intent.createChooser(send, title)) }
+            .onFailure { toJs("window.__scribeError && window.__scribeError(${json("No app on this phone can receive a share.")})") }
     }
 
     private fun toJs(script: String) {
@@ -484,7 +450,7 @@ class MainActivity : AppCompatActivity() {
                     (0 until a.length()).mapNotNull { a.optString(it).toLongOrNull() }
                 }.getOrDefault(emptyList())
                 if (ids.isEmpty()) return@runOnUiThread
-                copyIn(ids.map { ContentUris.withAppendedId(MediaStore.Audio.Media.EXTERNAL_CONTENT_URI, it) })
+                addToQueue(ids.map { ContentUris.withAppendedId(MediaStore.Audio.Media.EXTERNAL_CONTENT_URI, it) })
             }
         }
 
@@ -507,10 +473,88 @@ class MainActivity : AppCompatActivity() {
                 "micPermission" to hasMic(),
                 "mediaPermission" to hasMediaAccess(),
                 "pageReady" to pageReady,
-                "pendingShare" to pendingShare.size,
+                "pendingShare" to 0,
                 "importsDir" to (if (::imports.isInitialized) imports.listFiles()?.size ?: 0 else -1),
+                "queueJobs" to Queue.store.all().size,
+                "queueOpen" to Queue.store.all().count { !Status.finished(it.status) },
+                "queueRunning" to Queue.runner.isRunning,
+                "batteryUnrestricted" to batteryUnrestricted(),
             ),
         )
+
+        /* ── the file queue ── */
+
+        /** The whole list, as JSON. The page also gets this pushed on every change. */
+        @JavascriptInterface
+        fun queueSnapshot(): String = Queue.snapshot()
+
+        /** One file's transcript so far — complete when it is done, partial while it runs. */
+        @JavascriptInterface
+        fun jobSegments(id: String): String = Queue.segmentsJson(id)
+
+        @JavascriptInterface
+        fun cancelJob(id: String) = Queue.runner.cancel(id)
+
+        @JavascriptInterface
+        fun retryJob(id: String) {
+            Queue.runner.retry(id)
+            Queue.resume(this@MainActivity)
+        }
+
+        @JavascriptInterface
+        fun moveJob(id: String, delta: Int) = Queue.move(id, delta)
+
+        /** Forgets a file entirely, so sharing it again transcribes it again. */
+        @JavascriptInterface
+        fun removeJob(id: String) = Queue.remove(id)
+
+        @JavascriptInterface
+        fun clearFinished() = Queue.clearFinished()
+
+        /** The page has copied a finished transcript into its library. */
+        @JavascriptInterface
+        fun markImported(id: String) = Queue.markImported(id)
+
+        @JavascriptInterface
+        fun setQueueSettings(json: String) = Queue.applySettings(this@MainActivity, json)
+
+        /* ── the Groq key, kept in the Android Keystore rather than in the page ── */
+
+        @JavascriptInterface
+        fun setKey(key: String): Boolean = Queue.setKey(this@MainActivity, key)
+
+        @JavascriptInterface
+        fun getKey(): String = Queue.getKey(this@MainActivity)
+
+        /* ── the on-device engine ── */
+
+        @JavascriptInterface
+        fun downloadModel(id: String): Boolean = Queue.local.download(id).also { pushQueue() }
+
+        @JavascriptInterface
+        fun deleteModel() { Queue.local.deleteModel(); pushQueue() }
+
+        /* ── odds and ends ── */
+
+        /** Hands text to another app through the share sheet. */
+        @JavascriptInterface
+        fun shareText(title: String, text: String) {
+            runOnUiThread { shareOut(title, text) }
+        }
+
+        @JavascriptInterface
+        fun isBatteryUnrestricted(): Boolean = batteryUnrestricted()
+
+        /** Asks to be left alone by battery optimisation, which on some phones stops background work. */
+        @JavascriptInterface
+        fun openBatterySettings() {
+            runOnUiThread {
+                val direct = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:$packageName"))
+                try { startActivity(direct) } catch (e: Exception) {
+                    runCatching { startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)) }
+                }
+            }
+        }
 
         @JavascriptInterface
         fun stopRecording() {

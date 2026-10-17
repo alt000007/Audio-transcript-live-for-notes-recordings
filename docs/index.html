@@ -126,6 +126,17 @@
   .sess { display: flex; gap: 10px; align-items: center; padding: 11px 0; border-bottom: 1px solid var(--border); }
   .sess:last-child { border-bottom: 0; }
   .sess .t { font-weight: 600; font-size: 14.5px; }
+  .spread { justify-content: space-between; }
+  .bar { height: 4px; background: var(--surface-2); border-radius: 99px; overflow: hidden; margin-top: 6px; }
+  .bar > div { height: 100%; background: var(--accent); border-radius: 99px; transition: width .3s ease; }
+  .job { padding: 11px 0; border-bottom: 1px solid var(--border); }
+  .job:last-child { border-bottom: 0; }
+  .job .t { font-weight: 600; font-size: 14.5px; overflow-wrap: anywhere; }
+  .job .acts { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
+  .job.done .st { color: var(--ok); }
+  .job.failed .st { color: var(--live); }
+  .check { display: flex; align-items: center; gap: 10px; font-size: 14px; cursor: pointer; }
+  .check input { width: 18px; height: 18px; flex: none; }
   [hidden] { display: none !important; }
   @media (max-width: 420px) { .timer { font-size: 40px } }
 </style>
@@ -173,7 +184,7 @@
         <label for="title">Title</label>
         <input id="title" class="input" placeholder="e.g. Organic chemistry — week 4">
       </div>
-      <div class="tiny faint mono" id="buildline" style="text-align:right">2026-10-02 07:35 UTC</div>
+      <div class="tiny faint mono" id="buildline" style="text-align:right">2026-10-17 15:30 UTC</div>
       <div class="field" style="border-top:1px solid var(--border);padding-top:14px">
         <label for="importfile">Or import a recording</label>
         <input id="importfile" class="input" type="file" multiple accept="audio/*,.m4a,.mp3,.wav,.aac,.ogg,.webm">
@@ -191,17 +202,30 @@
       </div>
     </div>
 
+    <div id="queueline" class="banner info" style="margin-top:16px" hidden></div>
     <div id="backlog" class="banner info" style="margin-top:16px" hidden></div>
     <div id="live" style="margin-top:20px"></div>
   </section>
 
   <!-- ───────────── Notes ───────────── -->
   <section id="p-notes" hidden>
+    <div class="card" id="queue-card" hidden>
+      <div class="row spread" style="margin-bottom:4px">
+        <span class="tiny faint" style="text-transform:uppercase;letter-spacing:.06em">Transcribing</span>
+        <span class="row" style="gap:8px">
+          <span class="tiny faint" id="queue-sum"></span>
+          <button class="btn sm" id="queue-clear" hidden>Clear finished</button>
+        </span>
+      </div>
+      <div id="queue-note" class="tiny muted" hidden></div>
+      <div id="queue"></div>
+    </div>
     <div class="card" id="saved-card" hidden>
       <div class="row spread" style="margin-bottom:8px">
         <span class="tiny faint" style="text-transform:uppercase;letter-spacing:.06em">Your recordings</span>
         <span class="tiny faint" id="saved-count"></span>
       </div>
+      <input id="saved-search" class="input" type="search" placeholder="Search titles and transcripts" style="margin-bottom:6px" hidden>
       <div id="saved"></div>
     </div>
     <div class="card">
@@ -215,6 +239,7 @@
         <button class="btn primary" id="gen" disabled>Generate notes</button>
         <button class="btn" id="copy" disabled>Copy Markdown</button>
         <button class="btn" id="dl" disabled>Download</button>
+        <button class="btn" id="share" disabled hidden>Share</button>
         <button class="btn" id="edit" disabled>Edit transcript</button>
         <button class="btn" id="aifix" disabled>Correct with AI</button>
       </div>
@@ -281,11 +306,11 @@
       <div class="field">
         <label for="key">Groq API key <span class="faint" style="font-weight:400">— optional</span></label>
         <input id="key" class="input" type="password" autocomplete="off" placeholder="gsk_…">
-        <div class="hint">
+        <div class="hint" id="key-hint">
           Leave this empty and the app uses your browser's own speech recognition, which needs no
           account. Adding a free key from <strong>console.groq.com</strong> switches to
           <span class="mono">whisper-large-v3-turbo</span>, which is noticeably more accurate on
-          jargon and accents, and unlocks the AI notes pass. Stored in this browser only.
+          jargon and accents, and unlocks the AI notes pass. Stored in this browser only, encrypted.
         </div>
       </div>
       <div class="field">
@@ -314,8 +339,51 @@
         <div class="hint">Audio is cut at natural pauses; this is the cap for speakers who never pause.</div>
       </div>
     </div>
+    <div class="card stack" id="queue-settings" hidden>
+      <strong style="font-size:15px">Shared and imported files</strong>
+      <div class="field">
+        <label for="q-engine">Engine</label>
+        <select id="q-engine" class="input">
+          <option value="auto">Automatic &mdash; Groq, and the phone when Groq&rsquo;s allowance runs out</option>
+          <option value="groq">Groq only &mdash; online, free plan</option>
+          <option value="local">On this phone only &mdash; offline</option>
+        </select>
+        <div class="hint" id="q-engine-hint"></div>
+      </div>
+      <div class="field" id="q-model-field">
+        <label for="q-model">On-device model</label>
+        <div class="row">
+          <select id="q-model" class="input grow">
+            <option value="small">Small &mdash; 190 MB, more accurate</option>
+            <option value="base">Base &mdash; 60 MB, faster</option>
+          </select>
+          <button class="btn sm" id="q-model-dl">Download</button>
+          <button class="btn sm danger" id="q-model-del" hidden>Delete</button>
+        </div>
+        <div class="hint" id="q-model-status"></div>
+      </div>
+      <div class="field">
+        <label for="q-files">Files at once &mdash; <span id="q-files-v">2</span></label>
+        <input id="q-files" type="range" min="1" max="4" step="1" value="2" style="width:100%">
+      </div>
+      <div class="field">
+        <label for="q-uploads">Parts at once &mdash; <span id="q-uploads-v">3</span></label>
+        <input id="q-uploads" type="range" min="1" max="6" step="1" value="3" style="width:100%">
+        <div class="hint">Long files are cut into 5-minute parts that transcribe side by side. More is faster until Groq&rsquo;s free limits push back; the app then waits and carries on by itself.</div>
+      </div>
+      <label class="check"><input type="checkbox" id="q-trim" checked> Shorten long silences before sending</label>
+      <label class="check"><input type="checkbox" id="q-each"> Notify me when each file is done</label>
+      <label class="check"><input type="checkbox" id="q-batch" checked> Notify me when everything is done</label>
+      <label class="check"><input type="checkbox" id="q-keep"> Keep the app&rsquo;s copy of the audio afterwards</label>
+      <div class="row">
+        <button class="btn sm" id="q-battery">Let Scribe work in the background</button>
+        <span class="tiny faint" id="q-battery-v"></span>
+      </div>
+      <div class="hint" style="margin-top:-6px">Some phones (Xiaomi especially) stop apps in the background unless told not to. If transcription pauses when the screen is off, tap this and choose <em>Allow</em> / <em>No restrictions</em>.</div>
+    </div>
+
     <div class="card small muted">
-      <div class="tiny faint mono" style="float:right">build 2026-10-02 07:35 UTC</div>
+      <div class="tiny faint mono" style="float:right">build 2026-10-17 15:30 UTC</div>
       <strong style="color:var(--text)">What this is.</strong>
       A single-file version of Scribe for trying the pipeline. It keeps one recording at a time
       plus a list of saved transcripts in this browser. The full app adds accounts, cross-device
@@ -347,6 +415,8 @@ const LS = {
 
 const settings = {
   engine: LS.get('engine', 'auto'),
+  // Filled in at start-up from encrypted storage (see KEY below). Older builds
+  // kept it here in plain text; that copy is moved and deleted on first run.
   key: LS.get('key', ''),
   lang: LS.get('lang', ''),
   glossary: LS.get('glossary', ''),
@@ -370,10 +440,12 @@ const STORE = (() => {
   function open() {
     if (opening) return opening;
     opening = new Promise((resolve, reject) => {
-      const req = indexedDB.open('scribe-db', 1);
+      const req = indexedDB.open('scribe-db', 2);
       req.onupgradeneeded = () => {
         const db = req.result;
         if (!db.objectStoreNames.contains('sessions')) db.createObjectStore('sessions', { keyPath: 'id' });
+        // Encrypted key material for the browser build; see KEY.
+        if (!db.objectStoreNames.contains('secrets')) db.createObjectStore('secrets');
       };
       req.onsuccess = () => resolve(req.result);
       req.onerror = () => reject(req.error || new Error('Could not open storage.'));
@@ -381,9 +453,9 @@ const STORE = (() => {
     return opening;
   }
 
-  const run = (mode, make) => open().then((db) => new Promise((resolve, reject) => {
-    const tx = db.transaction('sessions', mode);
-    const req = make(tx.objectStore('sessions'));
+  const run = (mode, make, store = 'sessions') => open().then((db) => new Promise((resolve, reject) => {
+    const tx = db.transaction(store, mode);
+    const req = make(tx.objectStore(store));
     req.onsuccess = () => resolve(req.result);
     req.onerror = () => reject(req.error);
     tx.onabort = () => reject(tx.error || new Error('Storage transaction aborted.'));
@@ -393,15 +465,78 @@ const STORE = (() => {
     put: (row) => run('readwrite', (st) => st.put(row)),
     all: () => run('readonly', (st) => st.getAll()).then((rows) => (rows || []).sort((a, b) => b.startedAt - a.startedAt)),
     del: (id) => run('readwrite', (st) => st.delete(id)),
+    secret: (name) => run('readonly', (st) => st.get(name), 'secrets'),
+    setSecret: (name, value) => run('readwrite', (st) => (value == null ? st.delete(name) : st.put(value, name)), 'secrets'),
   };
 })();
 
+/* ══════════════ the API key ══════════════
+   Never kept in plain text. In the app it goes to the Android Keystore
+   through the bridge and only ever lives in this page's memory. In a browser
+   there is no keystore, so it is encrypted with a key the browser generates
+   and will not let anyone export, kept in IndexedDB. Either way the old
+   plain-text copy an earlier build left in localStorage is moved and wiped. */
+const KEY = {
+  native() {
+    try { return NATIVE && typeof window.ScribeNative.getKey === 'function'; } catch { return false; }
+  },
+
+  async load() {
+    const legacy = LS.get('key', '');
+    if (KEY.native()) {
+      if (legacy) {
+        try { if (window.ScribeNative.setKey(legacy)) localStorage.removeItem('scribe.key'); } catch {}
+      }
+      try { return window.ScribeNative.getKey() || legacy; } catch { return legacy; }
+    }
+    if (!window.crypto?.subtle) return legacy;   // no WebCrypto: leave things as they were
+    try {
+      if (legacy) {
+        await KEY.save(legacy);
+        localStorage.removeItem('scribe.key');
+        return legacy;
+      }
+      const sealed = await STORE.secret('groq');
+      if (!sealed) return '';
+      const plain = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: sealed.iv }, await KEY.wrapKey(), sealed.data);
+      return new TextDecoder().decode(plain);
+    } catch {
+      return legacy;
+    }
+  },
+
+  async save(value) {
+    if (KEY.native()) {
+      try { window.ScribeNative.setKey(value); } catch {}
+      try { localStorage.removeItem('scribe.key'); } catch {}
+      return;
+    }
+    if (!window.crypto?.subtle) { LS.set('key', value); return; }
+    if (!value) { await STORE.setSecret('groq', null); return; }
+    const iv = crypto.getRandomValues(new Uint8Array(12));
+    const data = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, await KEY.wrapKey(), new TextEncoder().encode(value));
+    await STORE.setSecret('groq', { iv, data });
+  },
+
+  /** A non-extractable AES key: usable by this page, never readable as bytes. */
+  async wrapKey() {
+    let k = await STORE.secret('wrap');
+    if (!k) {
+      k = await crypto.subtle.generateKey({ name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']);
+      await STORE.setSecret('wrap', k);
+    }
+    return k;
+  },
+};
+
 /** Everything saved, kept in memory so rendering stays synchronous. */
 let savedRows = [];
+let savedLoaded = false;
 
 async function refreshSaved() {
   try {
     savedRows = await STORE.all();
+    savedLoaded = true;
   } catch (e) {
     savedRows = [];
     alertBox('error', 'Could not read saved recordings from this device\u2019s storage.');
@@ -700,15 +835,12 @@ window.__scribeState = (recording) => {
 
 window.__scribeError = (message) => alertBox('error', escapeHtml(String(message)));
 
-/** The app has accepted a share and is about to read it. */
+/** The app has accepted a share; it is already being copied into the queue. */
 window.__scribeShareIncoming = (names, count) => {
-  const status = $('importstatus'), msg = $('importmsg');
-  if (status && msg) {
-    status.hidden = false;
-    msg.textContent = count > 1 ? `Reading ${count} shared files…` : `Reading ${names}…`;
-  }
-  show('rec');
-  alertBox('info', `Received <strong>${escapeHtml(String(names))}</strong> — transcribing it now.`);
+  if (!recordingNow()) show('notes');
+  alertBox('info', count > 1
+    ? `Received <strong>${count} files</strong> — they are in the queue below, and each one opens as soon as it is done.`
+    : `Received <strong>${escapeHtml(String(names))}</strong> — it is in the queue below.`);
 };
 
 /**
@@ -1061,7 +1193,7 @@ const NOTES_PROMPT_HEADER =
   'Do not add any fact, example or conclusion that is not in the transcript \u2014 if something is ' +
   'garbled beyond repair, write [unclear]. List every term you corrected at the end.';
 
-async function structure(chunks) {
+async function structure(chunks, onWait) {
   const body = {
     model: notesModel(),
     temperature: 0.2,
@@ -1079,7 +1211,7 @@ async function structure(chunks) {
         () => groq('chat/completions', {
           method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
         }),
-        signal,
+        onWait,
       );
     } catch (e) {
       if (e instanceof QuotaExhausted) throw e;
@@ -1517,16 +1649,24 @@ function renderTranscriptTab() {
 function renderNotesHeader() {
   if (!session) return;
   const done = session.segments.filter((s) => s.status === 'done');
-  const pending = session.segments.filter((s) => s.status === 'pending' || s.status === 'working').length;
+  let pending = session.segments.filter((s) => s.status === 'pending' || s.status === 'working').length;
+  // A file from the queue that is still going: its parts live in the app,
+  // not in this session, so count them from the queue instead.
+  const qj = session.fromQueue ? queueJob(session.id) : null;
+  const queueBusy = qj && (qj.status === 'waiting' || qj.status === 'processing');
+  if (queueBusy) pending = Math.max(1, (qj.chunksTotal || 0) - (qj.chunksDone || 0));
   const words = done.reduce((n, s) => n + (s.text ? s.text.trim().split(/\s+/).length : 0), 0);
   $('n-title').textContent = session.title;
   $('n-meta').innerHTML = `${new Date(session.startedAt).toLocaleString()} · <span class="mono">${fmt(session.durationMs || elapsed)}</span>`
     + (words ? ` · ${words.toLocaleString()} words` : '')
-    + (pending ? ` · <span class="pill">${pending} transcribing</span>` : '');
+    + (session.processingMs ? ` · transcribed in ${fmtDuration(session.processingMs)}` : '')
+    + (queueBusy ? ` · <span class="pill">${qj.chunksDone || 0} of ${qj.chunksTotal || '?'}${qj.prepared ? '' : '+'} parts done</span>`
+       : pending ? ` · <span class="pill">${pending} transcribing</span>` : '');
   const ready = done.length > 0 && pending === 0;
   $('gen').disabled = !ready;
   $('copy').disabled = !done.length;
   $('dl').disabled = !done.length;
+  $('share').disabled = !done.length;
   $('edit').disabled = !done.length;
   $('aifix').disabled = !done.length || !settings.key;
   $('gen').textContent = !settings.key ? 'Copy notes prompt'
@@ -1598,6 +1738,7 @@ function saveSession(s = session) {
     // Set when a long import ran out of quota part-way through, so the list
     // can say the recording is not the whole lecture.
     incomplete: Boolean(s.incomplete),
+    processingMs: s.processingMs || 0,
   };
   // Keep the in-memory copy in step immediately; the write is confirmed after.
   const i = savedRows.findIndex((r) => r.id === row.id);
@@ -1613,6 +1754,9 @@ function saveSession(s = session) {
 
 async function deleteSaved(id) {
   savedRows = savedRows.filter((r) => r.id !== id);
+  // Forget it in the app's queue too, so sharing the same file again
+  // transcribes it again instead of pointing at something deleted.
+  if (NATIVE) callNative('removeJob', id);
   renderSaved();
   try { await STORE.del(id); } catch { /* it is already gone from the list */ }
 }
@@ -1622,7 +1766,7 @@ function openSaved(row) {
   closePanels();
   session = {
     id: row.id, title: row.title, startedAt: row.startedAt, durationMs: row.durationMs,
-    notes: row.notes, incomplete: row.incomplete, engine: 'whisper',
+    notes: row.notes, incomplete: row.incomplete, engine: 'whisper', processingMs: row.processingMs || 0,
     segments: (row.segments || []).map((x, i) => ({ ...x, index: i, status: 'done', blob: null, attempts: 0, error: null })),
   };
   renderLive(); renderNotesHeader(); renderNotes(); renderSaved();
@@ -1644,12 +1788,20 @@ function renderSaved() {
     .filter((x) => pendingCount(x) > 0)
     .map((x) => ({ id: x.id, title: x.title, startedAt: x.startedAt, durationMs: x.durationMs,
                    working: pendingCount(x), notes: x.notes, segments: [] }));
-  const rows = [...live, ...savedRows.filter((r) => !live.some((l) => l.id === r.id))];
+  const all = [...live, ...savedRows.filter((r) => !live.some((l) => l.id === r.id))];
 
-  card.hidden = rows.length === 0;
+  card.hidden = all.length === 0;
+  const search = $('saved-search');
+  if (search) search.hidden = all.length < 4 && !search.value;
+  const q = search ? foldText(search.value.trim()) : '';
+  // Matches the title or anything said in the recording.
+  const rows = q ? all.filter((r) => foldText(r.title).includes(q) || foldText(transcriptOf(r)).includes(q)) : all;
   const count = $('saved-count');
-  if (count) count.textContent = rows.length ? `${rows.length}` : '';
-  if (!rows.length) return;
+  if (count) count.textContent = !all.length ? '' : q ? `${rows.length} of ${all.length}` : `${all.length}`;
+  if (!rows.length) {
+    host.innerHTML = q ? '<div class="small faint" style="padding:10px 0">Nothing matches that.</div>' : '';
+    return;
+  }
 
   host.innerHTML = rows.map((r, i) => {
     const words = r.segments ? r.segments.reduce((n, x) => n + (x.text ? x.text.trim().split(/\s+/).length : 0), 0) : 0;
@@ -1711,6 +1863,11 @@ function renderSaved() {
       renderNotesHeader(); renderNotes();
     };
   });
+}
+
+/** Lower-case and without accents, so "perche" finds "perché". */
+function foldText(s) {
+  return String(s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
 }
 
 /** Markdown for a stored row, without having to open it first. */
@@ -2188,15 +2345,449 @@ window.__scribeRecordings = (items) => {
   importBtn.onclick = () => {
     if (!chosen.size) return;
     host.hidden = true;
-    $('importstatus').hidden = false;
-    $('importmsg').textContent = 'Opening\u2026';
     try { window.ScribeNative.openRecordings(JSON.stringify([...chosen])); }
-    catch { $('importstatus').hidden = true; alertBox('error', 'Could not open those recordings.'); }
+    catch { alertBox('error', 'Could not open those recordings.'); }
   };
 
   sync();
 };
 $('pause').onclick = togglePause;
+
+/* ══════════════ the file queue (app only) ══════════════
+   Shared and picked files are queued, copied and transcribed by the app
+   itself, so they carry on with the screen off or the app closed, and survive
+   a crash or a reboot. This side only draws the list, opens results, and
+   copies each finished transcript into "Your recordings" the moment it is
+   done — not when the whole batch is. */
+
+let queueState = { jobs: [], settings: {}, local: {} };
+const knownJobs = new Set();
+let queueFirstPaint = true;
+
+/** Calls the app if it offers the method; older shells simply do not. */
+function callNative(name, ...args) {
+  try {
+    const fn = window.ScribeNative && window.ScribeNative[name];
+    return typeof fn === 'function' ? fn.apply(window.ScribeNative, args) : undefined;
+  } catch (e) {
+    return undefined;
+  }
+}
+
+function queueJob(id) {
+  return queueState.jobs.find((j) => j.id === id) || null;
+}
+
+/** "3m 12s", "1h 04m" — for how long something took. */
+function fmtDuration(ms) {
+  const s = Math.max(0, Math.round(ms / 1000));
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m ${String(s % 60).padStart(2, '0')}s`;
+  return `${Math.floor(m / 60)}h ${String(m % 60).padStart(2, '0')}m`;
+}
+
+/** A finished or partial transcript from the app, tidied the same way as live parts. */
+function jobSegments(id) {
+  let raw = [];
+  try { raw = JSON.parse(callNative('jobSegments', id) || '[]'); } catch { raw = []; }
+  const out = [];
+  for (const r of raw) {
+    const text = tidyTranscript(r.t);
+    if (!text) continue;
+    // Whisper loops on near-silence and can repeat the previous line verbatim.
+    if (out.length && out[out.length - 1].text === text) continue;
+    out.push({ startMs: r.s, endMs: r.e, text });
+  }
+  return out;
+}
+
+function jobTitle(j) {
+  return (j.name || 'Recording').replace(/\.[^.]+$/, '') || 'Recording';
+}
+
+/** What the app pushes on every change of state. */
+window.__scribeQueue = (snap) => {
+  if (!snap || !Array.isArray(snap.jobs)) return;
+  const prev = queueState;
+  queueState = snap;
+
+  // New files arrived (shared, picked or chosen from the list): show them.
+  const fresh = snap.jobs.filter((j) => !knownJobs.has(j.id));
+  snap.jobs.forEach((j) => knownJobs.add(j.id));
+  // On the first paint, a file shared a moment ago is what opened the app.
+  const justShared = queueFirstPaint && snap.jobs.some((j) =>
+    (j.status === 'waiting' || j.status === 'processing') && Date.now() - j.createdAt < 60000);
+  if ((fresh.length && !queueFirstPaint) || justShared) {
+    $('importstatus').hidden = true;
+    if (!recordingNow()) show('notes');
+  }
+  queueFirstPaint = false;
+
+  renderQueue();
+  renderQueueSettings();
+  syncFinishedJobs();
+
+  // Keep an open, still-running file's text growing as parts land.
+  if (session && session.fromQueue) {
+    const j = queueJob(session.id);
+    const before = prev.jobs.find((x) => x.id === session.id);
+    if (j && (!before || before.chunksDone !== j.chunksDone || before.status !== j.status)) refreshOpenJob(j);
+  }
+};
+
+/** Opens a file from the queue: the saved copy if it has one, the live one if not. */
+function openJob(id) {
+  closePanels();
+  const saved = savedRows.find((r) => r.id === id);
+  if (saved) { openSaved(saved); return; }
+  const j = queueJob(id);
+  if (!j) return;
+  session = {
+    id, title: jobTitle(j), startedAt: j.createdAt, durationMs: j.durationMs, notes: null,
+    engine: 'whisper', fromQueue: true, processingMs: j.status === 'done' ? j.processingMs : 0, segments: [],
+  };
+  refreshOpenJob(j);
+  renderNotes();
+  show('notes');
+  $('v-tx').click();
+}
+
+function refreshOpenJob(j) {
+  const saved = savedRows.find((r) => r.id === j.id);
+  if (saved && j.status === 'done') {
+    // It has landed in the library; show that copy, which can be edited.
+    const keepTab = !$('tx-out').hidden;
+    openSaved(saved);
+    if (keepTab) $('v-tx').click();
+    return;
+  }
+  session.segments = jobSegments(j.id).map((x, i) => ({ ...x, index: i, status: 'done', blob: null, attempts: 0, error: null }));
+  if (j.durationMs) session.durationMs = j.durationMs;
+  renderLive(); renderNotesHeader(); renderTranscriptTab();
+}
+
+const syncing = new Set();
+
+/**
+ * Copies each finished file into "Your recordings" as soon as it is done.
+ * The app keeps its own copy too; the page's copy is the one notes and edits
+ * are attached to.
+ */
+async function syncFinishedJobs() {
+  // Until the library has been read, there is no telling what is already in it.
+  if (!savedLoaded) return;
+  for (const j of queueState.jobs) {
+    if (j.status !== 'done' || j.imported || syncing.has(j.id)) continue;
+    syncing.add(j.id);
+    try {
+      // Already here (the app was closed between saving and confirming):
+      // never overwrite notes or edits made since.
+      if (!savedRows.some((r) => r.id === j.id)) {
+        const segs = jobSegments(j.id);
+        const row = {
+          id: j.id, title: jobTitle(j), startedAt: j.createdAt,
+          durationMs: j.durationMs || (segs.length ? segs[segs.length - 1].endMs : 0),
+          segments: segs.map((x) => ({ startMs: x.startMs, text: x.text })),
+          notes: null, incomplete: false, processingMs: j.processingMs || 0, engine: j.engine || 'groq',
+        };
+        await STORE.put(row);
+        savedRows = [row, ...savedRows.filter((r) => r.id !== row.id)];
+        renderSaved();
+      }
+      callNative('markImported', j.id);
+      j.imported = true;
+    } catch (e) {
+      alertBox('error', `&ldquo;${escapeHtml(jobTitle(j))}&rdquo; finished but could not be saved to the list. It is still in the queue above.`);
+    } finally {
+      syncing.delete(j.id);
+    }
+  }
+}
+
+function jobStatusLine(j) {
+  const parts = j.chunksTotal ? `${j.chunksDone} of ${j.chunksTotal}${j.prepared ? '' : '+'} parts` : '';
+  switch (j.status) {
+    case 'waiting':
+      return j.note && j.note !== 'Waiting' ? j.note : `Waiting · ${ordinal(j.position)} in line`;
+    case 'processing':
+      return j.note ? `${j.note}${parts ? ` · ${parts}` : ''}` : `Transcribing · ${parts || 'starting'}`;
+    case 'done': {
+      const bits = [`Done in ${fmtDuration(j.processingMs)}`];
+      if (j.durationMs) bits.push(`${fmt(j.durationMs)} of audio`);
+      if (j.durationMs && j.processingMs) bits.push(`${Math.max(1, Math.round(j.durationMs / j.processingMs))}× real time`);
+      if (j.engine && j.engine.includes('local')) bits.push(j.engine === 'local' ? 'on this phone' : 'partly on this phone');
+      return bits.join(' · ');
+    }
+    case 'failed':
+      return j.error || 'Could not be transcribed.';
+    case 'cancelled':
+      return j.chunksDone ? `Cancelled · ${j.chunksDone} finished part${j.chunksDone === 1 ? '' : 's'} kept` : 'Cancelled';
+    default:
+      return j.status;
+  }
+}
+
+function ordinal(n) {
+  if (!n) return 'next';
+  return n === 1 ? '1st' : n === 2 ? '2nd' : n === 3 ? '3rd' : `${n}th`;
+}
+
+function jobProgress(j) {
+  if (j.status === 'done') return 1;
+  if (!j.chunksTotal) return 0;
+  const share = j.chunksDone / j.chunksTotal;
+  // Still being cut up: scale by how far through the file that has got.
+  if (!j.prepared && j.durationMs) return share * Math.min(1, j.preparedToMs / j.durationMs);
+  return share;
+}
+
+function renderQueue() {
+  const card = $('queue-card');
+  if (!card) return;
+  const jobs = queueState.jobs;
+  card.hidden = !NATIVE || jobs.length === 0;
+  renderQueueLine();
+  if (card.hidden) return;
+
+  const count = (st) => jobs.filter((j) => j.status === st).length;
+  const done = count('done'), active = count('processing'), waiting = count('waiting'), failed = count('failed');
+  $('queue-sum').textContent = [done && `${done} done`, active && `${active} working`, waiting && `${waiting} waiting`,
+    failed && `${failed} failed`].filter(Boolean).join(' · ');
+  $('queue-clear').hidden = done === 0;
+
+  const note = $('queue-note');
+  note.hidden = !queueState.blocked;
+  note.textContent = queueState.blocked || '';
+
+  $('queue').innerHTML = jobs.map((j) => {
+    const busy = j.status === 'processing' || j.status === 'waiting';
+    const pct = Math.round(jobProgress(j) * 100);
+    const acts = [];
+    if (j.status === 'done') {
+      acts.push(`<button class="btn sm primary" data-q="open" data-id="${j.id}">Open</button>`,
+        `<button class="btn sm" data-q="copy" data-id="${j.id}">Copy</button>`,
+        `<button class="btn sm" data-q="share" data-id="${j.id}">Share</button>`,
+        `<button class="btn sm" data-q="dl" data-id="${j.id}">Download</button>`);
+    } else {
+      if (j.chunksDone > 0) acts.push(`<button class="btn sm" data-q="open" data-id="${j.id}">${busy ? 'See so far' : 'Open what was done'}</button>`);
+      if (j.status === 'waiting') {
+        acts.push(`<button class="btn sm" data-q="up" data-id="${j.id}" aria-label="Move up">↑</button>`,
+          `<button class="btn sm" data-q="down" data-id="${j.id}" aria-label="Move down">↓</button>`);
+      }
+      if (busy) acts.push(`<button class="btn sm" data-q="cancel" data-id="${j.id}">Cancel</button>`);
+      if (j.status === 'failed' || j.status === 'cancelled') {
+        acts.push(`<button class="btn sm primary" data-q="retry" data-id="${j.id}">Retry</button>`,
+          `<button class="btn sm danger" data-q="remove" data-id="${j.id}" aria-label="Remove">&times;</button>`);
+      }
+    }
+    return `<div class="job ${j.status}">
+      <div class="row" style="gap:8px;align-items:flex-start">
+        ${j.status === 'processing' ? '<span class="spin" style="margin-top:3px"></span>' : ''}
+        <span class="grow">
+          <span class="t" style="display:block">${escapeHtml(j.name)}</span>
+          <span class="tiny st ${j.status === 'done' ? '' : 'faint'}" style="display:block">${escapeHtml(jobStatusLine(j))}</span>
+        </span>
+      </div>
+      ${j.status === 'processing' ? `<div class="bar"><div style="width:${pct}%"></div></div>` : ''}
+      ${acts.length ? `<div class="acts">${acts.join('')}</div>` : ''}
+    </div>`;
+  }).join('');
+
+  $('queue').querySelectorAll('[data-q]').forEach((b) => {
+    b.onclick = () => queueAction(b.dataset.q, b.dataset.id, b);
+  });
+}
+
+/** On the Record tab: a one-line reminder that files are still going. */
+function renderQueueLine() {
+  const el = $('queueline');
+  if (!el) return;
+  const open = queueState.jobs.filter((j) => j.status === 'processing' || j.status === 'waiting');
+  if (!NATIVE || !open.length) { el.hidden = true; return; }
+  const done = queueState.jobs.filter((j) => j.status === 'done').length;
+  el.hidden = false;
+  el.innerHTML = `<div class="grow"><strong>Transcribing ${open.length} file${open.length === 1 ? '' : 's'}</strong>` +
+    `<div class="tiny" style="margin-top:2px">${done ? `${done} ready to read. ` : ''}It carries on with the app closed.</div></div>` +
+    '<button class="btn sm" id="queueline-open">View</button>';
+  $('queueline-open').onclick = () => show('notes');
+}
+
+async function queueAction(what, id, btn) {
+  const j = queueJob(id);
+  switch (what) {
+    case 'open': openJob(id); break;
+    case 'cancel': callNative('cancelJob', id); break;
+    case 'retry': callNative('retryJob', id); break;
+    case 'up': callNative('moveJob', id, -1); break;
+    case 'down': callNative('moveJob', id, 1); break;
+    case 'remove':
+      if (confirm(`Remove "${j ? j.name : 'this file'}" from the queue?`)) callNative('removeJob', id);
+      break;
+    case 'copy': case 'share': case 'dl': {
+      const md = jobMarkdown(id);
+      if (!md) { alertBox('warn', 'That file has no transcript yet.'); return; }
+      const title = j ? jobTitle(j) : 'Transcript';
+      if (what === 'share') { shareMarkdown(title, md); return; }
+      if (what === 'dl') { downloadMarkdown(title, md); return; }
+      try {
+        await navigator.clipboard.writeText(md);
+        btn.textContent = 'Copied';
+        setTimeout(() => { btn.textContent = 'Copy'; }, 1600);
+      } catch {
+        alertBox('info', 'The clipboard is blocked here. Use Share or Download instead.');
+      }
+      break;
+    }
+  }
+}
+
+/** Markdown for a queue file: from the library if it is there (it may have notes or edits). */
+function jobMarkdown(id) {
+  const saved = savedRows.find((r) => r.id === id);
+  if (saved) return notesToMarkdownRow(saved);
+  const j = queueJob(id);
+  const segs = jobSegments(id);
+  if (!j || !segs.length) return '';
+  return notesToMarkdownRow({ title: jobTitle(j), startedAt: j.createdAt, durationMs: j.durationMs, notes: null, segments: segs });
+}
+
+function shareMarkdown(title, md) {
+  if (NATIVE && callNative('shareText', title, md) !== undefined) return;
+  if (navigator.share) { navigator.share({ title, text: md }).catch(() => {}); return; }
+  downloadMarkdown(title, md);
+}
+
+function downloadMarkdown(title, md) {
+  const name = (title.replace(/[^\p{L}\p{N}\s-]/gu, '').trim().replace(/\s+/g, '-').slice(0, 60) || 'recording') + '.md';
+  const url = URL.createObjectURL(new Blob([md], { type: 'text/markdown;charset=utf-8' }));
+  const a = document.createElement('a'); a.href = url; a.download = name; a.click();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+/** A notification was tapped. */
+window.__scribeOpenJob = (id) => {
+  const snap = callNative('queueSnapshot');
+  if (snap) { try { window.__scribeQueue(JSON.parse(snap)); } catch {} }
+  // The library copy may still be on its way in; give it a moment.
+  setTimeout(() => openJob(id), savedRows.some((r) => r.id === id) ? 0 : 400);
+};
+
+/** The same file was shared again. Nothing is processed twice. */
+window.__scribeDuplicate = (name, id, status) => {
+  if (status === 'done') {
+    alertBox('info', `<strong>${escapeHtml(name)}</strong> was already transcribed — here it is.`);
+    setTimeout(() => openJob(id), 300);
+  } else if (status === 'failed' || status === 'cancelled') {
+    alertBox('info', `<strong>${escapeHtml(name)}</strong> was already in the queue; trying it again.`);
+  } else {
+    alertBox('info', `<strong>${escapeHtml(name)}</strong> is already in the queue.`);
+  }
+};
+
+/* ── queue settings ── */
+
+function pushQueueSettings() {
+  if (!NATIVE) return;
+  const v = (id) => $(id);
+  callNative('setQueueSettings', JSON.stringify({
+    engine: v('q-engine').value,
+    filesAtOnce: +v('q-files').value,
+    uploadsAtOnce: +v('q-uploads').value,
+    trimSilence: v('q-trim').checked,
+    notifyEach: v('q-each').checked,
+    notifyBatch: v('q-batch').checked,
+    keepAudio: v('q-keep').checked,
+    lang: settings.lang,
+    glossary: settings.glossary,
+  }));
+}
+
+let queueSettingsLoaded = false;
+
+function renderQueueSettings() {
+  if (!NATIVE) return;
+  const st = queueState.settings || {};
+  // Fill the controls once from what the app has saved; after that they
+  // are the source of truth and only push.
+  if (!queueSettingsLoaded && queueState.settings) {
+    queueSettingsLoaded = true;
+    if (st.engine) $('q-engine').value = st.engine;
+    if (st.filesAtOnce) $('q-files').value = st.filesAtOnce;
+    if (st.uploadsAtOnce) $('q-uploads').value = st.uploadsAtOnce;
+    $('q-trim').checked = st.trimSilence !== false;
+    $('q-each').checked = Boolean(st.notifyEach);
+    $('q-batch').checked = st.notifyBatch !== false;
+    $('q-keep').checked = Boolean(st.keepAudio);
+    $('q-files-v').textContent = $('q-files').value;
+    $('q-uploads-v').textContent = $('q-uploads').value;
+    if (queueState.local && queueState.local.model) $('q-model').value = queueState.local.model;
+  }
+
+  const local = queueState.local || {};
+  const engine = $('q-engine').value;
+  $('q-engine-hint').innerHTML =
+    engine === 'groq'
+      ? 'Whisper large-v3-turbo on Groq&rsquo;s free plan: fast and the most accurate option, but needs a connection and allows about <strong>2 hours of audio per hour and 8 per day</strong>. Past that, files wait and carry on by themselves when it frees up.'
+    : engine === 'local'
+      ? 'Runs entirely on this phone: free with no limits and works offline, nothing leaves the phone. Much slower (often slower than the recording itself), uses a lot of battery, and is <strong>noticeably less accurate</strong> than Groq, especially on Italian and technical words.'
+      : 'Uses Groq while its free allowance lasts, and this phone only when the allowance is used up for a while (if the offline model is downloaded). Files are never lost either way &mdash; without the model they simply wait.';
+
+  const field = $('q-model-field');
+  field.hidden = local.supported === false && engine !== 'local';
+  const status = $('q-model-status');
+  const dl = $('q-model-dl'), del = $('q-model-del');
+  if (local.supported === false) {
+    status.textContent = 'The on-device engine is not included in this build.';
+    dl.disabled = true; del.hidden = true;
+  } else if (typeof local.downloading === 'number') {
+    status.textContent = `Downloading… ${Math.round(local.downloading * 100)}%`;
+    dl.disabled = true; del.hidden = true;
+  } else if (local.ready) {
+    status.textContent = `Ready: ${local.label || local.model}. Delete it to free ${local.sizeMb || ''} MB.`;
+    dl.disabled = true; del.hidden = false;
+  } else {
+    status.textContent = 'Not downloaded. Needed for offline transcription; downloads once, ideally on Wi-Fi.';
+    dl.disabled = false; del.hidden = true;
+  }
+
+  const bat = callNative('isBatteryUnrestricted');
+  $('q-battery-v').textContent = bat === true ? 'Allowed' : bat === false ? 'Restricted' : '';
+}
+
+function initQueue() {
+  for (const id of ['q-engine', 'q-trim', 'q-each', 'q-batch', 'q-keep']) {
+    $(id).onchange = () => { pushQueueSettings(); renderQueueSettings(); };
+  }
+  $('q-files').oninput = () => { $('q-files-v').textContent = $('q-files').value; };
+  $('q-uploads').oninput = () => { $('q-uploads-v').textContent = $('q-uploads').value; };
+  $('q-files').onchange = $('q-uploads').onchange = pushQueueSettings;
+  $('q-model-dl').onclick = () => {
+    if (!callNative('downloadModel', $('q-model').value)) {
+      alertBox('error', 'Could not start the download. Check the connection and try again.');
+    }
+    refreshQueue();
+  };
+  $('q-model-del').onclick = () => {
+    if (confirm('Delete the offline model? You can download it again later.')) { callNative('deleteModel'); refreshQueue(); }
+  };
+  $('q-battery').onclick = () => callNative('openBatterySettings');
+  $('queue-clear').onclick = () => callNative('clearFinished');
+  $('saved-search').oninput = renderSaved;
+
+  refreshQueue();
+  // The app holds settings the page never sent before (language, glossary).
+  setTimeout(pushQueueSettings, 0);
+  // Progress the app does not push (a model download) is polled, slowly.
+  setInterval(() => {
+    if (typeof (queueState.local || {}).downloading === 'number' || !$('p-set').hidden) refreshQueue();
+  }, 2000);
+}
+
+function refreshQueue() {
+  const snap = callNative('queueSnapshot');
+  if (snap) { try { window.__scribeQueue(JSON.parse(snap)); } catch {} }
+}
 
 /* ── editing and AI correction ── */
 
@@ -2306,11 +2897,13 @@ $('gen').onclick = async () => {
   }
   const b = $('gen'); b.disabled = true; b.textContent = 'Working…';
   try {
-    session.notes = await structure(timedChunks());
+    session.notes = await structure(timedChunks(), (m) => { b.textContent = m; });
     renderNotes(); saveSession();
     $('v-notes').click();
   } catch (e) {
-    alertBox('error', escapeHtml(e.message));
+    alertBox('error', e instanceof QuotaExhausted
+      ? `Groq&rsquo;s free allowance is used up for now. Try again in about ${humanWait(e.waitMs)}.`
+      : escapeHtml(e.message));
   } finally { renderNotesHeader(); }
 };
 
@@ -2323,6 +2916,8 @@ $('copy').onclick = async () => {
     alertBox('info', 'Clipboard blocked by the browser — use Download instead.');
   }
 };
+
+$('share').onclick = () => shareMarkdown(session.title, toMarkdown());
 
 $('dl').onclick = () => {
   const name = (session.title.replace(/[^\p{L}\p{N}\s-]/gu, '').trim().replace(/\s+/g, '-').slice(0, 60) || 'recording') + '.md';
@@ -2344,17 +2939,20 @@ function renderEngineHint() {
 $('engine').value = settings.engine;
 $('engine').onchange = (e) => { settings.engine = e.target.value; LS.set('engine', settings.engine); renderEngineHint(); };
 $('key').value = settings.key;
+let keySaveTimer = null;
 $('key').oninput = (e) => {
   settings.key = e.target.value.trim();
-  LS.set('key', settings.key);
+  // Saved encrypted, a moment after typing stops.
+  clearTimeout(keySaveTimer);
+  keySaveTimer = setTimeout(() => { KEY.save(settings.key).catch(() => {}); }, 400);
   // Clear the "no key yet" prompt as soon as one is entered.
   if (settings.key && noKeyBanner) { noKeyBanner.remove(); noKeyBanner = null; }
   renderEngineHint();
 };
 $('lang').value = settings.lang;
-$('lang').onchange = (e) => { settings.lang = e.target.value; LS.set('lang', settings.lang); };
+$('lang').onchange = (e) => { settings.lang = e.target.value; LS.set('lang', settings.lang); pushQueueSettings(); };
 $('glossary').value = settings.glossary;
-$('glossary').oninput = (e) => { settings.glossary = e.target.value; LS.set('glossary', settings.glossary); };
+$('glossary').oninput = (e) => { settings.glossary = e.target.value; LS.set('glossary', settings.glossary); pushQueueSettings(); };
 $('maxseg').value = settings.maxSeg;
 $('maxseg-v').textContent = Math.round(settings.maxSeg / 1000);
 $('maxseg').oninput = (e) => { settings.maxSeg = +e.target.value; LS.set('maxSeg', settings.maxSeg);
@@ -2490,6 +3088,8 @@ function readDiagnostics() {
       `files in transit  ${d.importsDir}`,
       `transcriber       ${activeEngine()}   key ${settings.key ? 'set' : 'MISSING'}`,
       `saved recordings  ${savedRows.length}`,
+      `file queue        ${d.queueJobs ?? '?'} jobs, ${d.queueOpen ?? '?'} unfinished, ${d.queueRunning ? 'running' : 'idle'}`,
+      `battery           ${d.batteryUnrestricted ? 'unrestricted' : 'optimised (may pause in background)'}`,
       '',
       ...(d.events || []).map((e) => `${(e.t / 1000).toFixed(1).padStart(7)}s  ${String(e.what).padEnd(8)} ${e.detail}`),
     ].join('\n');
@@ -2524,6 +3124,12 @@ function readDiagnostics() {
       '<strong>Edge</strong>, or add a free Groq key under Settings to use Whisper instead.', false);
   }
   if (NATIVE) {
+    $('share').hidden = false;
+    $('queue-settings').hidden = false;
+    $('key-hint').innerHTML =
+      'A free key from <strong>console.groq.com</strong> transcribes with <span class="mono">whisper-large-v3-turbo</span> ' +
+      'and unlocks the AI notes pass. Kept encrypted in the Android Keystore on this phone, never in plain text.';
+    initQueue();
     $('diag-card').hidden = false;
     $('diag-refresh').onclick = readDiagnostics;
     $('diag-copy').onclick = async () => {
@@ -2546,8 +3152,18 @@ function readDiagnostics() {
   renderEngineHint();
   renderLive(); renderNotes(); renderBacklog();
   // Recordings live in IndexedDB now; bring across anything an older build
-  // left in localStorage before listing them.
-  migrateFromLocalStorage().then(refreshSaved);
+  // left in localStorage before listing them. Then pick up any file the queue
+  // finished while the app was closed.
+  migrateFromLocalStorage().then(refreshSaved).then(() => { if (NATIVE) syncFinishedJobs(); });
+  // Move the key out of plain text, and read it back from encrypted storage.
+  KEY.load().then((k) => {
+    if (k && k !== settings.key) {
+      settings.key = k;
+      $('key').value = k;
+      if (noKeyBanner) { noKeyBanner.remove(); noKeyBanner = null; }
+      renderEngineHint();
+    }
+  });
 })();
 </script>
 <script>
