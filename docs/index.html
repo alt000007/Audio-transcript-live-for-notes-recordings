@@ -184,7 +184,7 @@
         <label for="title">Title</label>
         <input id="title" class="input" placeholder="e.g. Organic chemistry — week 4">
       </div>
-      <div class="tiny faint mono" id="buildline" style="text-align:right">2026-10-17 15:30 UTC</div>
+      <div class="tiny faint mono" id="buildline" style="text-align:right">2026-11-27 08:12 UTC</div>
       <div class="field" style="border-top:1px solid var(--border);padding-top:14px">
         <label for="importfile">Or import a recording</label>
         <input id="importfile" class="input" type="file" multiple accept="audio/*,.m4a,.mp3,.wav,.aac,.ogg,.webm">
@@ -209,6 +209,7 @@
 
   <!-- ───────────── Notes ───────────── -->
   <section id="p-notes" hidden>
+    <div id="rename-banner" class="banner info" hidden></div>
     <div class="card" id="queue-card" hidden>
       <div class="row spread" style="margin-bottom:4px">
         <span class="tiny faint" style="text-transform:uppercase;letter-spacing:.06em">Transcribing</span>
@@ -226,6 +227,7 @@
         <span class="tiny faint" id="saved-count"></span>
       </div>
       <input id="saved-search" class="input" type="search" placeholder="Search titles and transcripts" style="margin-bottom:6px" hidden>
+      <div id="saved-subjects" class="row" style="gap:6px;margin-bottom:6px" hidden></div>
       <div id="saved"></div>
     </div>
     <div class="card">
@@ -339,6 +341,42 @@
         <div class="hint">Audio is cut at natural pauses; this is the cap for speakers who never pause.</div>
       </div>
     </div>
+    <div class="card stack" id="org-card" hidden>
+      <strong style="font-size:15px">Organise my recordings</strong>
+      <div class="tiny muted">
+        Scribe transcribes every recording in your recorder&rsquo;s folder &mdash; and each new one as you make it &mdash;
+        then names it by subject and theme, numbered in the order they were recorded, e.g.
+        <span class="mono">Storia 03 - La rivoluzione francese</span>.
+      </div>
+      <div class="field">
+        <label>Recorder folders</label>
+        <div id="org-folders"><button class="btn sm" id="org-load">Show the folders on this phone</button></div>
+        <div class="hint" id="org-estimate"></div>
+      </div>
+      <label class="check"><input type="checkbox" id="org-auto"> Transcribe and name all my recordings automatically</label>
+      <div class="field">
+        <label for="org-subjects">My subjects <span class="faint" style="font-weight:400">&mdash; optional</span></label>
+        <input id="org-subjects" class="input" placeholder="Storia, Filosofia, Matematica, Italiano">
+        <div class="hint">With a list, every recording goes into one of these (or Altro). Without one, Scribe works the subjects out and keeps reusing the same names.</div>
+      </div>
+      <div class="field">
+        <label for="org-format">Name format</label>
+        <input id="org-format" class="input mono" value="{subject} {n} - {theme}">
+        <div class="hint" id="org-preview"></div>
+      </div>
+      <label class="check"><input type="checkbox" id="org-rename" checked> Also rename the files, so my recorder app shows the new names</label>
+      <div class="hint" style="margin-top:-6px">Renames the audio files themselves. Some recorder apps keep their own list and may show a renamed file as new, or lose its tags &mdash; try it on a few first. <em>Restore original names</em> undoes it.</div>
+      <div class="row">
+        <button class="btn sm" id="org-allfiles">Rename without asking each time</button>
+        <span class="tiny faint" id="org-allfiles-v"></span>
+      </div>
+      <div class="row">
+        <button class="btn sm" id="org-retry" hidden>Retry naming</button>
+        <button class="btn sm danger" id="org-restore" hidden>Restore original file names</button>
+      </div>
+      <div id="org-status" class="tiny muted"></div>
+    </div>
+
     <div class="card stack" id="queue-settings" hidden>
       <strong style="font-size:15px">Shared and imported files</strong>
       <div class="field">
@@ -383,7 +421,7 @@
     </div>
 
     <div class="card small muted">
-      <div class="tiny faint mono" style="float:right">build 2026-10-17 15:30 UTC</div>
+      <div class="tiny faint mono" style="float:right">build 2026-11-27 08:12 UTC</div>
       <strong style="color:var(--text)">What this is.</strong>
       A single-file version of Scribe for trying the pipeline. It keeps one recording at a time
       plus a list of saved transcripts in this browser. The full app adds accounts, cross-device
@@ -1794,8 +1832,11 @@ function renderSaved() {
   const search = $('saved-search');
   if (search) search.hidden = all.length < 4 && !search.value;
   const q = search ? foldText(search.value.trim()) : '';
+  renderSubjectChips(all);
   // Matches the title or anything said in the recording.
-  const rows = q ? all.filter((r) => foldText(r.title).includes(q) || foldText(transcriptOf(r)).includes(q)) : all;
+  let rows = q ? all.filter((r) => foldText(r.title).includes(q) || foldText(transcriptOf(r)).includes(q)) : all;
+  // One subject: its recordings in order, 1, 2, 3 …
+  if (subjectFilter) rows = rows.filter((r) => r.subject === subjectFilter).sort((a, b) => (a.number || 0) - (b.number || 0));
   const count = $('saved-count');
   if (count) count.textContent = !all.length ? '' : q ? `${rows.length} of ${all.length}` : `${all.length}`;
   if (!rows.length) {
@@ -2426,7 +2467,8 @@ window.__scribeQueue = (snap) => {
 
   renderQueue();
   renderQueueSettings();
-  syncFinishedJobs();
+  renderOrganise();
+  syncFinishedJobs().then(syncNames);
 
   // Keep an open, still-running file's text growing as parts land.
   if (session && session.fromQueue) {
@@ -2486,13 +2528,14 @@ async function syncFinishedJobs() {
       if (!savedRows.some((r) => r.id === j.id)) {
         const segs = jobSegments(j.id);
         const row = {
-          id: j.id, title: jobTitle(j), startedAt: j.createdAt,
+          id: j.id, title: j.title || jobTitle(j), startedAt: j.recordedAt || j.createdAt,
+          subject: j.subject || '', number: j.number || 0, theme: j.theme || '',
           durationMs: j.durationMs || (segs.length ? segs[segs.length - 1].endMs : 0),
           segments: segs.map((x) => ({ startMs: x.startMs, text: x.text })),
           notes: null, incomplete: false, processingMs: j.processingMs || 0, engine: j.engine || 'groq',
         };
         await STORE.put(row);
-        savedRows = [row, ...savedRows.filter((r) => r.id !== row.id)];
+        savedRows = [row, ...savedRows.filter((r) => r.id !== row.id)].sort((a, b) => b.startedAt - a.startedAt);
         renderSaved();
       }
       callNative('markImported', j.id);
@@ -2546,7 +2589,7 @@ function renderQueue() {
   const card = $('queue-card');
   if (!card) return;
   const jobs = queueState.jobs;
-  card.hidden = !NATIVE || jobs.length === 0;
+  card.hidden = !NATIVE || (jobs.length === 0 && !queueState.hiddenWaiting);
   renderQueueLine();
   if (card.hidden) return;
 
@@ -2585,7 +2628,8 @@ function renderQueue() {
       <div class="row" style="gap:8px;align-items:flex-start">
         ${j.status === 'processing' ? '<span class="spin" style="margin-top:3px"></span>' : ''}
         <span class="grow">
-          <span class="t" style="display:block">${escapeHtml(j.name)}</span>
+          <span class="t" style="display:block">${escapeHtml(j.title || j.name)}</span>
+          ${j.title ? `<span class="tiny faint mono" style="display:block">${escapeHtml(j.name)}</span>` : ''}
           <span class="tiny st ${j.status === 'done' ? '' : 'faint'}" style="display:block">${escapeHtml(jobStatusLine(j))}</span>
         </span>
       </div>
@@ -2593,6 +2637,11 @@ function renderQueue() {
       ${acts.length ? `<div class="acts">${acts.join('')}</div>` : ''}
     </div>`;
   }).join('');
+
+  if (queueState.hiddenWaiting) {
+    $('queue').insertAdjacentHTML('beforeend',
+      `<div class="tiny faint" style="padding:10px 0">and ${queueState.hiddenWaiting} more waiting, oldest first</div>`);
+  }
 
   $('queue').querySelectorAll('[data-q]').forEach((b) => {
     b.onclick = () => queueAction(b.dataset.q, b.dataset.id, b);
@@ -2787,6 +2836,203 @@ function initQueue() {
 function refreshQueue() {
   const snap = callNative('queueSnapshot');
   if (snap) { try { window.__scribeQueue(JSON.parse(snap)); } catch {} }
+}
+
+/* ══════════════ organising the phone's recordings (app only) ══════════════
+   Every recording in the chosen folders — and each new one as it is made —
+   is transcribed and then named by subject and theme, numbered in the order
+   it was recorded: "Storia 03 - La rivoluzione francese". The app does the
+   work; this side shows the settings, keeps the titles in "Your recordings"
+   in step, and asks before renaming the files themselves. */
+
+let orgFolders = [];          // what the phone's library holds, from the app
+let orgLoadedSettings = false;
+let lastNamesVersion = -1;
+let subjectFilter = '';       // '' = all
+
+function orgState() { return queueState.organise || {}; }
+
+function orgSettingsFromForm() {
+  const chosen = [...document.querySelectorAll('#org-folders [data-folder]')].filter((b) => b.checked).map((b) => b.dataset.folder);
+  return {
+    auto: $('org-auto').checked,
+    folders: chosen.length || !orgFolders.length ? chosen : (orgState().folders || []),
+    subjects: $('org-subjects').value.split(/[,\n]/).map((x) => x.trim()).filter(Boolean),
+    format: $('org-format').value.trim() || '{subject} {n} - {theme}',
+    renameFiles: $('org-rename').checked,
+  };
+}
+
+function pushOrganise() {
+  callNative('setOrganise', JSON.stringify(orgSettingsFromForm()));
+  renderOrganise();
+}
+
+/** What a name will look like, before anything is renamed. */
+function previewName(format) {
+  const pad = (n) => String(n).padStart(2, '0');
+  return (format || '{subject} {n} - {theme}')
+    .replace('{subject}', 'Storia').replace('{n}', pad(3)).replace('{theme}', 'La rivoluzione francese');
+}
+
+function hours(ms) {
+  const h = ms / 3600000;
+  return h < 1 ? `${Math.round(ms / 60000)} min` : `${h.toFixed(h < 10 ? 1 : 0)} h`;
+}
+
+window.__scribeLibraryFolders = (list) => {
+  orgFolders = Array.isArray(list) ? list : [];
+  const st = orgState();
+  const host = $('org-folders');
+  if (!orgFolders.length) {
+    host.innerHTML = '<span class="small">No audio found on this phone yet.</span>';
+    renderOrganise();
+    return;
+  }
+  // Pre-tick what was chosen before, or the folders that look like a recorder's.
+  const chosen = new Set((st.folders && st.folders.length) ? st.folders : orgFolders.filter((f) => f.recorder).map((f) => f.path));
+  host.innerHTML = orgFolders.map((f) => `
+    <label class="check" style="align-items:flex-start;margin:6px 0">
+      <input type="checkbox" data-folder="${escapeHtml(f.path)}" ${chosen.has(f.path) ? 'checked' : ''} style="margin-top:3px">
+      <span class="grow"><span class="mono small">${escapeHtml(f.path || '(main folder)')}</span>
+        <span class="tiny faint" style="display:block">${f.count} recording${f.count === 1 ? '' : 's'} · ${hours(f.totalMs)}${
+          f.examples && f.examples.length ? ' · e.g. ' + escapeHtml(f.examples.slice(0, 2).join(', ')) : ''}</span></span>
+    </label>`).join('');
+  host.querySelectorAll('[data-folder]').forEach((b) => { b.onchange = () => { if ($('org-auto').checked) pushOrganise(); else renderOrganise(); }; });
+  renderOrganise();
+};
+
+function renderOrganise() {
+  if (!NATIVE) return;
+  const st = orgState();
+  if (!orgLoadedSettings && queueState.organise) {
+    orgLoadedSettings = true;
+    $('org-auto').checked = Boolean(st.auto);
+    $('org-subjects').value = (st.subjects || []).join(', ');
+    $('org-format').value = st.format || '{subject} {n} - {theme}';
+    $('org-rename').checked = st.renameFiles !== false;
+  }
+  $('org-preview').innerHTML = `Looks like: <span class="mono">${escapeHtml(previewName($('org-format').value))}</span>. ` +
+    '<span class="mono">{subject}</span>, <span class="mono">{n}</span> (its number within the subject, oldest first) and <span class="mono">{theme}</span> are filled in.';
+
+  // How long the backlog will take, so nobody is surprised.
+  const chosen = new Set([...document.querySelectorAll('#org-folders [data-folder]')].filter((b) => b.checked).map((b) => b.dataset.folder));
+  const sel = orgFolders.filter((f) => chosen.has(f.path));
+  const newCount = sel.reduce((n, f) => n + f.newCount, 0), newMs = sel.reduce((n, f) => n + f.newMs, 0);
+  $('org-estimate').textContent = !orgFolders.length ? '' : !sel.length ? 'Tick the folder your recorder saves to.'
+    : newCount === 0 ? 'Everything in these folders is already in Scribe.'
+    : `${newCount} recording${newCount === 1 ? '' : 's'} (${hours(newMs)}) not transcribed yet. Groq’s free plan does about 8 h of audio a day, ` +
+      `so this takes ${newMs <= 8 * 3600000 ? 'under a day' : `about ${Math.ceil(newMs / (8 * 3600000))} days`}; it carries on by itself, oldest first.`;
+
+  const bits = [];
+  if (st.auto) {
+    if (st.libraryQueued) bits.push(`${st.libraryQueued} recording${st.libraryQueued === 1 ? '' : 's'} waiting to be transcribed`);
+    if (st.named) bits.push(`${st.named} named`);
+    if (st.namingFailed) bits.push(`${st.namingFailed} could not be named`);
+    if (st.blocked) bits.push(st.blocked);
+  }
+  $('org-status').textContent = bits.join(' · ');
+  $('org-retry').hidden = !st.namingFailed;
+  $('org-restore').hidden = !st.restorable;
+  $('org-allfiles').hidden = st.canAsk === false;
+  $('org-allfiles-v').textContent = st.allFilesAccess ? 'Allowed — files are renamed as soon as they are named' : 'Not allowed — Android asks once per batch';
+  renderRenameBanner();
+}
+
+/** Files named but not yet renamed on the phone: one tap, one system dialog. */
+function renderRenameBanner() {
+  const el = $('rename-banner');
+  if (!el) return;
+  const st = orgState();
+  const n = st.renamePending || 0;
+  if (!NATIVE || !st.renameFiles || !n || st.allFilesAccess) { el.hidden = true; return; }
+  el.hidden = false;
+  el.innerHTML = `<div class="grow"><strong>${n} recording${n === 1 ? ' has a' : 's have'} new name${n === 1 ? '' : 's'}.</strong>` +
+    '<div class="tiny" style="margin-top:2px">Rename the file' + (n === 1 ? '' : 's') + ' in your recorder app too? Android will ask you to allow it.</div></div>' +
+    '<button class="btn sm primary" id="rename-now">Rename</button>';
+  $('rename-now').onclick = () => callNative('renameOnPhone', false);
+}
+
+window.__scribeRenamed = (done, total, restore, cancelled) => {
+  if (cancelled) { alertBox('info', 'Nothing was renamed.'); return; }
+  if (!total) return;
+  alertBox(done === total ? 'info' : 'warn', restore
+    ? `${done} of ${total} recordings have their original names back. Scribe will not rename files again unless you turn it back on.`
+    : `${done} of ${total} recordings renamed on the phone.` + (done < total ? ' The rest may have been moved or deleted.' : ''));
+  refreshQueue();
+};
+
+/**
+ * Keeps titles and subjects in "Your recordings" in step with the app's
+ * naming — including renumbering when an older recording is named later.
+ */
+async function syncNames() {
+  const st = orgState();
+  if (st.namesVersion === lastNamesVersion || !savedLoaded) return;
+  lastNamesVersion = st.namesVersion;
+  let named = [];
+  try { named = JSON.parse(callNative('namedJobs') || '[]'); } catch { return; }
+  let changed = 0;
+  for (const n of named) {
+    const row = savedRows.find((r) => r.id === n.id);
+    if (!row) continue;
+    if (row.title === n.title && row.subject === n.subject && row.number === n.number && row.theme === n.theme) continue;
+    Object.assign(row, { title: n.title, subject: n.subject, number: n.number, theme: n.theme });
+    if (n.recordedAt) row.startedAt = n.recordedAt;
+    changed++;
+    STORE.put(row).catch(() => {});
+    if (session && session.id === row.id) { session.title = row.title; renderNotesHeader(); }
+  }
+  if (changed) { savedRows.sort((a, b) => b.startedAt - a.startedAt); renderSaved(); }
+}
+
+/** Subject chips above "Your recordings": tap one to see that course, in order. */
+function renderSubjectChips(all) {
+  const host = $('saved-subjects');
+  if (!host) return;
+  const counts = new Map();
+  for (const r of all) if (r.subject) counts.set(r.subject, (counts.get(r.subject) || 0) + 1);
+  if (!counts.size) { host.hidden = true; subjectFilter = ''; return; }
+  if (subjectFilter && !counts.has(subjectFilter)) subjectFilter = '';
+  host.hidden = false;
+  const chip = (value, label) =>
+    `<button class="btn sm" data-subject="${escapeHtml(value)}" aria-pressed="${subjectFilter === value}" style="${subjectFilter === value ? 'background:var(--accent);border-color:var(--accent);color:#fff' : ''}">${escapeHtml(label)}</button>`;
+  host.innerHTML = chip('', 'All') + [...counts.entries()].sort((a, b) => a[0].localeCompare(b[0]))
+    .map(([s, n]) => chip(s, `${s} (${n})`)).join('');
+  host.querySelectorAll('[data-subject]').forEach((b) => { b.onclick = () => { subjectFilter = b.dataset.subject; renderSaved(); }; });
+}
+
+function initOrganise() {
+  $('org-card').hidden = false;
+  $('org-auto').onchange = () => {
+    if ($('org-auto').checked) {
+      const s = orgSettingsFromForm();
+      if (!s.folders.length) {
+        alertBox('warn', 'Choose the folder your recorder saves to first.');
+        $('org-auto').checked = false;
+        callNative('libraryFolders');
+        return;
+      }
+      const sel = orgFolders.filter((f) => s.folders.includes(f.path));
+      const n = sel.reduce((a, f) => a + f.newCount, 0);
+      if (n > 0 && !confirm(`Transcribe and name ${n} recording${n === 1 ? '' : 's'} (${hours(sel.reduce((a, f) => a + f.newMs, 0))})? ` +
+          'It runs by itself in the background, oldest first.')) {
+        $('org-auto').checked = false;
+        return;
+      }
+    }
+    pushOrganise();
+  };
+  $('org-rename').onchange = pushOrganise;
+  $('org-subjects').onchange = pushOrganise;
+  $('org-format').oninput = renderOrganise;
+  $('org-format').onchange = pushOrganise;
+  $('org-load').onclick = () => callNative('libraryFolders');
+  $('org-allfiles').onclick = () => callNative('requestAllFilesAccess');
+  $('org-retry').onclick = () => callNative('retryNaming');
+  $('org-restore').onclick = () => {
+    if (confirm('Give every renamed recording its original file name back? Titles in Scribe stay as they are.')) callNative('renameOnPhone', true);
+  };
 }
 
 /* ── editing and AI correction ── */
@@ -3090,6 +3336,7 @@ function readDiagnostics() {
       `saved recordings  ${savedRows.length}`,
       `file queue        ${d.queueJobs ?? '?'} jobs, ${d.queueOpen ?? '?'} unfinished, ${d.queueRunning ? 'running' : 'idle'}`,
       `battery           ${d.batteryUnrestricted ? 'unrestricted' : 'optimised (may pause in background)'}`,
+      `organise          ${orgState().auto ? 'on' : 'off'}, ${orgState().named ?? 0} named, ${orgState().renamePending ?? 0} to rename, all-files ${orgState().allFilesAccess ? 'yes' : 'no'}`,
       '',
       ...(d.events || []).map((e) => `${(e.t / 1000).toFixed(1).padStart(7)}s  ${String(e.what).padEnd(8)} ${e.detail}`),
     ].join('\n');
@@ -3126,6 +3373,7 @@ function readDiagnostics() {
   if (NATIVE) {
     $('share').hidden = false;
     $('queue-settings').hidden = false;
+    initOrganise();
     $('key-hint').innerHTML =
       'A free key from <strong>console.groq.com</strong> transcribes with <span class="mono">whisper-large-v3-turbo</span> ' +
       'and unlocks the AI notes pass. Kept encrypted in the Android Keystore on this phone, never in plain text.';
@@ -3154,7 +3402,13 @@ function readDiagnostics() {
   // Recordings live in IndexedDB now; bring across anything an older build
   // left in localStorage before listing them. Then pick up any file the queue
   // finished while the app was closed.
-  migrateFromLocalStorage().then(refreshSaved).then(() => { if (NATIVE) syncFinishedJobs(); });
+  migrateFromLocalStorage().then(refreshSaved).then(async () => {
+    if (!NATIVE) return;
+    await syncFinishedJobs();
+    await syncNames();
+    // Already organising: show the folders straight away (the permission is there).
+    if (orgState().auto) callNative('libraryFolders');
+  });
   // Move the key out of plain text, and read it back from encrypted storage.
   KEY.load().then((k) => {
     if (k && k !== settings.key) {

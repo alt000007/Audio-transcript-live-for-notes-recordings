@@ -117,7 +117,7 @@ class TranscribeService : Service() {
         val total = jobs.sumOf { it.chunks.size }
         val done = jobs.sumOf { it.chunksDone() }
         val title = when {
-            jobs.isEmpty() -> "Scribe"
+            jobs.isEmpty() -> "Naming your recordings"
             jobs.size == 1 -> "Transcribing ${active?.name ?: ""}"
             else -> "Transcribing ${jobs.size} files"
         }
@@ -218,17 +218,52 @@ class TranscribeService : Service() {
         private const val CHANNEL_DONE = "scribe-done"
         private const val NOTIFY_PROGRESS = 2
         private const val NOTIFY_BATCH = 3
+        private const val NOTIFY_NEW = 4
 
-        fun start(context: Context) {
+        /** @return false when Android refused to let the service start from here. */
+        fun start(context: Context): Boolean {
             val intent = Intent(context, TranscribeService::class.java)
-            try {
+            return try {
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) context.startForegroundService(intent)
                 else context.startService(intent)
+                true
             } catch (e: Exception) {
                 // Not allowed from where we are; run without the service for now.
                 Diag.log("queue", "service start refused: ${e.message}")
                 Queue.init(context)
                 Queue.runner.start()
+                false
+            }
+        }
+
+        /**
+         * New recordings were found while Scribe was closed and Android would
+         * not let it start working in the background: offer a one-tap start.
+         */
+        fun notifyNewRecordings(context: Context, count: Int) {
+            val m = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                m.createNotificationChannel(
+                    NotificationChannel(CHANNEL_DONE, "Finished transcriptions", NotificationManager.IMPORTANCE_DEFAULT),
+                )
+            }
+            val open = PendingIntent.getActivity(
+                context, NOTIFY_NEW,
+                Intent(context, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP),
+                PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+            )
+            val b = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) Notification.Builder(context, CHANNEL_DONE)
+                    else @Suppress("DEPRECATION") Notification.Builder(context)
+            runCatching {
+                m.notify(
+                    NOTIFY_NEW,
+                    b.setContentTitle(if (count == 1) "New recording found" else "$count new recordings found")
+                        .setContentText("Tap to transcribe and name ${if (count == 1) "it" else "them"}")
+                        .setSmallIcon(android.R.drawable.stat_sys_upload)
+                        .setAutoCancel(true)
+                        .setContentIntent(open)
+                        .build(),
+                )
             }
         }
     }

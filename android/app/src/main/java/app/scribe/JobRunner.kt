@@ -29,6 +29,16 @@ interface Preparer {
     fun prepare(job: Job, store: JobStore, onChunk: (Chunk) -> Unit, cancelled: () -> Boolean)
 }
 
+/** Work done on a file after it is transcribed: naming it by subject and theme. */
+interface PostProcessor {
+    /** Whether finished files should go through it at all. */
+    fun enabled(): Boolean
+    /** Null when it can run now; otherwise why not, in words. */
+    fun unavailable(): String?
+    /** Marks the job's naming "done" itself. Throws like an engine does. */
+    fun process(job: Job)
+}
+
 class QueueSettings(
     /** Files worked on at the same time. */
     val filesAtOnce: Int = 2,
@@ -63,6 +73,13 @@ class JobRunner(
     private val engines: Map<String, Engine>,
     private val settings: () -> QueueSettings,
     private val clock: () -> Long = System::currentTimeMillis,
+    /**
+     * Brings in a file from the phone's library when its turn comes.
+     * @return false when it turned out to be a file already in the queue,
+     * in which case it has been dealt with and this job removed.
+     */
+    private val materializer: ((Job) -> Boolean)? = null,
+    private val namer: PostProcessor? = null,
 ) {
     interface Listener {
         fun onChange()
@@ -79,6 +96,9 @@ class JobRunner(
     private val preparing = HashSet<String>()
     private val cancelFlags = HashMap<String, AtomicBoolean>()
     private var inFlight = 0
+    private var namingBusy = false
+    /** Naming waits for its own rate limit, separately from transcription. */
+    @Volatile private var nameWaitUntil = 0L
 
     /** Until when the online engine has asked everyone to wait. Limits are per account, not per file. */
     @Volatile var waitUntil = 0L
@@ -146,7 +166,7 @@ class JobRunner(
         synchronized(store) {
             val job = store.get(id) ?: return
             if (job.status != Status.FAILED && job.status != Status.CANCELLED) return
-            if (!job.copied) return
+            if (!job.available) return
             job.status = Status.WAITING
             job.error = null
             for (c in job.chunks) if (c.status == "failed") { c.status = "pending"; c.attempts = 0; c.error = null }
@@ -196,13 +216,17 @@ class JobRunner(
         val finished = ArrayList<Job>()
 
         val window: List<Job>
+        var toName: Job? = null
         synchronized(store) {
             val all = store.all()
-            val open = all.filter { !Status.finished(it.status) && it.copied }
-            val copying = all.any { !Status.finished(it.status) && !it.copied }
+            val open = all.filter { !Status.finished(it.status) && it.available }
+            val copying = all.any { !Status.finished(it.status) && !it.available }
+            if (namer != null && namer.enabled() && namer.unavailable() == null) {
+                toName = all.firstOrNull { it.status == Status.DONE && it.naming == "pending" }
+            }
             if (open.isEmpty()) {
-                val busy = synchronized(lock) { preparing.isNotEmpty() || inFlight > 0 }
-                return if (!busy && !copying) Pass.IDLE else Pass.WAIT
+                val busy = synchronized(lock) { preparing.isNotEmpty() || inFlight > 0 || namingBusy }
+                if (!busy && !copying && toName == null) return Pass.IDLE
             }
             window = open.take(s.filesAtOnce.coerceIn(1, 4))
 
@@ -217,6 +241,15 @@ class JobRunner(
             }
         }
         finished.forEach { listener?.onFinished(it) }
+
+        // Name finished files one at a time, alongside transcription.
+        toName?.let { job ->
+            val start = synchronized(lock) {
+                if (namingBusy || now < nameWaitUntil) false else { namingBusy = true; true }
+            }
+            if (start) pool.execute { runNaming(job) }
+        }
+        if (window.isEmpty()) return Pass.WAIT
 
         // Start preparing the files at the front that are not yet cut up.
         for (job in window) {
@@ -309,14 +342,15 @@ class JobRunner(
             for (job in store.all()) {
                 val note = when {
                     Status.finished(job.status) -> ""
-                    !job.copied -> "Copying into the app…"
+                    !job.available -> "Copying into the app…"
                     job !in window -> "Waiting"
                     engine == null && now < waitUntil ->
                         "Waiting for the rate limit — ${humanWait(waitUntil - now)}"
                     engine == null && blockedNote != null -> blockedNote!!
                     job.chunks.any { it.status == "pending" && it.notBefore > now } &&
                         job.chunks.none { it.status == "working" } -> "No connection — retrying"
-                    !job.prepared && job.chunks.isEmpty() -> "Preparing the audio…"
+                    !job.prepared && job.chunks.isEmpty() ->
+                        if (job.copied) "Preparing the audio…" else "Reading the recording…"
                     else -> ""
                 }
                 if (note != job.note) { job.note = note; changed = true }
@@ -337,6 +371,10 @@ class JobRunner(
     private fun prepareJob(job: Job, flag: AtomicBoolean) {
         var failedOutright = false
         try {
+            if (!job.copied) {
+                val m = materializer ?: throw IllegalStateException("This file was never copied in. Share it again.")
+                if (!m(job)) return
+            }
             preparer.prepare(job, store, { chunk ->
                 synchronized(store) {
                     job.chunks.add(chunk)
@@ -443,6 +481,29 @@ class JobRunner(
         }
     }
 
+    private fun runNaming(job: Job) {
+        try {
+            namer!!.process(job)
+        } catch (e: RateLimited) {
+            nameWaitUntil = clock() + e.waitMs
+            Diag.log("naming", "rate limited, wait ${e.waitMs}ms")
+        } catch (e: Transient) {
+            nameWaitUntil = clock() + 30_000
+        } catch (e: KeyRejected) {
+            nameWaitUntil = clock() + 60_000
+        } catch (e: Throwable) {
+            synchronized(store) {
+                job.naming = "failed"
+                store.save(job)
+            }
+            Diag.log("naming", "${job.name}: ${e.message}")
+        } finally {
+            synchronized(lock) { namingBusy = false }
+            changed()
+            kick()
+        }
+    }
+
     /** Called with the store locked. */
     private fun finishJob(job: Job, s: QueueSettings) {
         val failed = job.chunks.filter { it.status == "failed" }
@@ -452,6 +513,7 @@ class JobRunner(
         if (failed.isEmpty()) {
             job.status = Status.DONE
             job.error = null
+            if (namer != null && namer.enabled() && job.naming.isEmpty()) job.naming = "pending"
             store.finish(job, s.keepAudio)
         } else {
             // Keep everything that did work; Retry redoes only the failed parts.

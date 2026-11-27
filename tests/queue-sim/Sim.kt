@@ -547,7 +547,7 @@ fun main(args: Array<String>) {
     val only = args.firstOrNull()
     val tests = listOf(::testLiveResults, ::testKillAndResume, ::testKillMidPreparation, ::testRateLimitAndNetwork,
         ::testFallbackAndBlocked, ::testCancelRetryReorder, ::testDuplicates, ::testAtomicWrites,
-        ::testResampler, ::testChunker, ::testGroq, ::benchmark)
+        ::testResampler, ::testChunker, ::testGroq, ::testNamingHelpers, ::testClassifier, ::testLibraryAndNaming, ::benchmark)
     for (t in tests) if (only == null || t.name.contains(only, ignoreCase = true)) t()
     println(if (failures == 0) "\nALL PASSED" else "\n$failures FAILED")
     if (failures > 0) System.exit(1)

@@ -11,8 +11,8 @@ android {
         applicationId = "app.scribe"
         minSdk = 26          // AudioRecord + MediaCodec paths below assume Oreo
         targetSdk = 35
-        versionCode = 2
-        versionName = "1.1"
+        versionCode = 3
+        versionName = "1.2"
 
         // The on-device transcriber is native code. 64-bit ARM only: every
         // phone that runs a current Android is, and each extra ABI adds

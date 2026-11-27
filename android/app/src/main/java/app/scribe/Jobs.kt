@@ -133,6 +133,30 @@ class Job(val id: String, val createdAt: Long) {
     /** Hidden from the queue list, still remembered for duplicate detection. */
     var cleared = false
 
+    /**
+     * Set for a recording found in the phone's own recorder folder rather
+     * than shared: where to read it from. Such a job is not copied in until
+     * its turn comes, so a backlog of hundreds of lectures does not double
+     * the space they take.
+     */
+    var mediaUri = ""
+    /** When it was recorded, for numbering in order. */
+    var recordedAt = 0L
+
+    /* Naming, once transcribed: "" not asked for, "pending", "done", "failed". */
+    var naming = ""
+    var subject = ""
+    var theme = ""
+    var number = 0
+    /** "Storia 03 - La rivoluzione francese" — what Scribe and the phone call it. */
+    var title = ""
+    /** The file's name on the phone before Scribe renamed it, for undoing. */
+    var originalName = ""
+    /** The name Scribe last gave the file on the phone. */
+    var appliedName = ""
+    /** The phone's copy should be renamed to [title] but has not been yet. */
+    var renamePending = false
+
     val chunks = ArrayList<Chunk>()
 
     /** Not persisted: what is happening right now, in words, for the list. */
@@ -140,6 +164,12 @@ class Job(val id: String, val createdAt: Long) {
     var sessionStart = 0L
 
     fun chunksDone() = chunks.count { it.status == "done" }
+
+    /** Ready to be worked on: copied in, or readable from the phone's library. */
+    val available get() = copied || mediaUri.isNotEmpty()
+
+    /** What to show: the name Scribe gave it, or the file's own. */
+    fun displayTitle() = title.ifEmpty { name.substringBeforeLast('.').ifEmpty { name } }
 
     fun liveActiveMs(now: Long) = activeMs + if (sessionStart > 0) now - sessionStart else 0
 
@@ -154,6 +184,10 @@ class Job(val id: String, val createdAt: Long) {
         .put("durationMs", durationMs).put("keptMs", keptMs)
         .put("startedAt", startedAt).put("finishedAt", finishedAt).put("activeMs", activeMs)
         .put("imported", imported).put("cleared", cleared)
+        .put("mediaUri", mediaUri).put("recordedAt", recordedAt)
+        .put("naming", naming).put("subject", subject).put("theme", theme).put("number", number)
+        .put("title", title).put("originalName", originalName).put("appliedName", appliedName)
+        .put("renamePending", renamePending)
         .put("chunks", JSONArray().apply { chunks.forEach { put(it.toJson()) } })
 
     /** What the page needs to draw the list — no transcript text. */
@@ -170,6 +204,9 @@ class Job(val id: String, val createdAt: Long) {
         .put("processingMs", liveActiveMs(now))
         .put("engine", engines())
         .put("imported", imported)
+        .put("title", title).put("subject", subject).put("number", number).put("theme", theme)
+        .put("recordedAt", recordedAt)
+        .put("naming", naming).put("renamePending", renamePending).put("linked", mediaUri.isNotEmpty())
 
     companion object {
         fun fromJson(o: JSONObject): Job = Job(o.getString("id"), o.optLong("createdAt")).apply {
@@ -190,6 +227,16 @@ class Job(val id: String, val createdAt: Long) {
             activeMs = o.optLong("activeMs")
             imported = o.optBoolean("imported")
             cleared = o.optBoolean("cleared")
+            mediaUri = o.optString("mediaUri")
+            recordedAt = o.optLong("recordedAt")
+            naming = o.optString("naming")
+            subject = o.optString("subject")
+            theme = o.optString("theme")
+            number = o.optInt("number")
+            title = o.optString("title")
+            originalName = o.optString("originalName")
+            appliedName = o.optString("appliedName")
+            renamePending = o.optBoolean("renamePending")
             val arr = o.optJSONArray("chunks") ?: JSONArray()
             for (i in 0 until arr.length()) chunks.add(Chunk.fromJson(arr.getJSONObject(i)))
         }
@@ -237,7 +284,9 @@ class JobStore(val root: File) {
             val o = readJson(File(dir(id), "job.json")) ?: continue
             val job = runCatching { Job.fromJson(o) }.getOrNull() ?: continue
             var changed = false
-            if (!job.copied && !Status.finished(job.status)) {
+            // A recording from the phone's library is read again when its
+            // turn comes; only a share's copy can be lost with the process.
+            if (!job.copied && job.mediaUri.isEmpty() && !Status.finished(job.status)) {
                 // The share's permission to read the file ended with the old
                 // process, so this one cannot be finished. Say so plainly.
                 job.status = Status.FAILED
@@ -295,6 +344,10 @@ class JobStore(val root: File) {
         writeOrder()
         dir(id).deleteRecursively()
     }
+
+    @Synchronized
+    fun findByMedia(uri: String): Job? =
+        if (uri.isEmpty()) null else jobs.values.firstOrNull { it.mediaUri == uri }
 
     @Synchronized
     fun findByHash(hash: String, except: String): Job? =

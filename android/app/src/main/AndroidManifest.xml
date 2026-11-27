@@ -25,6 +25,10 @@
     <!-- Lets Settings offer the one-tap "don't restrict Scribe" prompt, which
          some phones need before they allow any background work at all. -->
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+    <!-- Optional, granted by the user in system settings: lets Scribe rename
+         the recordings it has named without Android asking each time.
+         Without it, renaming asks once per batch. -->
+    <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />
 
     <application
         android:allowBackup="true"
@@ -81,6 +85,12 @@
             android:name=".TranscribeService"
             android:exported="false"
             android:foregroundServiceType="dataSync" />
+
+        <!-- Notices new recordings while Scribe is closed. -->
+        <service
+            android:name=".LibraryWatchJob"
+            android:exported="false"
+            android:permission="android.permission.BIND_JOB_SERVICE" />
 
         <!-- Hands long transcripts to other apps as a file, which an intent's
              text field is too small for. -->

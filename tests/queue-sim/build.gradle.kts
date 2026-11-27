@@ -7,7 +7,7 @@ plugins {
     application
 }
 
-repositories { mavenCentral() }
+repositories { maven("https://repo1.maven.org/maven2") }
 
 
 sourceSets {
@@ -17,7 +17,8 @@ sourceSets {
             srcDir(".")
             include(
                 "app/scribe/Jobs.kt", "app/scribe/JobRunner.kt", "app/scribe/Chunker.kt",
-                "app/scribe/GroqEngine.kt", "app/scribe/Diag.kt", "Sim.kt", "Stubs.kt",
+                "app/scribe/GroqEngine.kt", "app/scribe/Namer.kt", "app/scribe/Diag.kt",
+                "Sim.kt", "NamingSim.kt", "Stubs.kt",
             )
         }
     }

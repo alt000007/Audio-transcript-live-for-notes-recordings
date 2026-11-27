@@ -23,6 +23,7 @@ import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
@@ -91,6 +92,28 @@ class MainActivity : AppCompatActivity() {
     private val askMedia = registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
         if (granted) emitRecordings()
         else toJs("window.__scribeNoMediaAccess && window.__scribeNoMediaAccess()")
+    }
+
+    /** The same permission, asked for by the "organise my recordings" settings. */
+    private val askMediaForLibrary = registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        if (granted) emitLibraryFolders()
+        else toJs("window.__scribeNoMediaAccess && window.__scribeNoMediaAccess()")
+    }
+
+    /** Renames waiting on the system's "allow Scribe to modify these files?" answer. */
+    private var pendingRename: Pair<List<Pair<Job, String>>, Boolean>? = null
+
+    private val askWrite = registerForActivityResult(ActivityResultContracts.StartIntentSenderForResult()) { result ->
+        val (targets, restore) = pendingRename ?: return@registerForActivityResult
+        pendingRename = null
+        if (result.resultCode != RESULT_OK) {
+            toJs("window.__scribeRenamed && window.__scribeRenamed(0, ${targets.size}, $restore, true)")
+            return@registerForActivityResult
+        }
+        thread(isDaemon = true) {
+            val done = Queue.performRenames(targets, restore)
+            runOnUiThread { toJs("window.__scribeRenamed && window.__scribeRenamed($done, ${targets.size}, $restore, false)") }
+        }
     }
 
     @SuppressLint("SetJavaScriptEnabled")
@@ -262,6 +285,14 @@ class MainActivity : AppCompatActivity() {
         // Unfinished files carry on, and the list catches up with whatever
         // happened while the app was away.
         Queue.resume(this)
+        if (Queue.organise.auto && hasMediaAccess()) {
+            // Recordings made since the app was last open.
+            thread(isDaemon = true) {
+                Queue.syncLibrary(this)
+                Queue.renameWithoutAsking()
+                if (Queue.hasUnfinished()) TranscribeService.start(this)
+            }
+        }
         pushQueue()
         toJs("window.__scribeState && window.__scribeState(${RecordingService.isRunning})")
     }
@@ -371,6 +402,44 @@ class MainActivity : AppCompatActivity() {
                 }
             }
             runOnUiThread { toJs("window.__scribeRecordings && window.__scribeRecordings($out)") }
+        }
+    }
+
+    private fun emitLibraryFolders() {
+        thread(isDaemon = true) {
+            val json = Queue.libraryFolders(this)
+            runOnUiThread { toJs("window.__scribeLibraryFolders && window.__scribeLibraryFolders($json)") }
+        }
+    }
+
+    /**
+     * Renames recordings in the phone's library. With "all files access" it
+     * just does it; otherwise Android shows one dialog for the whole batch.
+     */
+    private fun renameOnPhone(restore: Boolean) {
+        val targets = Queue.renameTargets(restore)
+        if (targets.isEmpty()) {
+            toJs("window.__scribeRenamed && window.__scribeRenamed(0, 0, $restore, false)")
+            return
+        }
+        if (Queue.hasAllFilesAccess()) {
+            thread(isDaemon = true) {
+                val done = Queue.performRenames(targets, restore)
+                runOnUiThread { toJs("window.__scribeRenamed && window.__scribeRenamed($done, ${targets.size}, $restore, false)") }
+            }
+            return
+        }
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
+            toJs("window.__scribeError && window.__scribeError(${json("Renaming other apps' recordings needs Android 11 or newer.")})")
+            return
+        }
+        try {
+            val request = MediaStore.createWriteRequest(contentResolver, targets.map { Uri.parse(it.first.mediaUri) })
+            pendingRename = targets to restore
+            askWrite.launch(IntentSenderRequest.Builder(request.intentSender).build())
+        } catch (e: Exception) {
+            pendingRename = null
+            toJs("window.__scribeError && window.__scribeError(${json("Android would not let Scribe ask to rename these files: ${e.message}")})")
         }
     }
 
@@ -544,6 +613,46 @@ class MainActivity : AppCompatActivity() {
 
         @JavascriptInterface
         fun isBatteryUnrestricted(): Boolean = batteryUnrestricted()
+
+        /* ── organising the phone's recordings ── */
+
+        /** Folders with audio in them; answered through __scribeLibraryFolders. */
+        @JavascriptInterface
+        fun libraryFolders() {
+            runOnUiThread {
+                if (hasMediaAccess()) emitLibraryFolders() else askMediaForLibrary.launch(mediaPermission)
+            }
+        }
+
+        @JavascriptInterface
+        fun setOrganise(json: String) = Queue.applyOrganise(this@MainActivity, json)
+
+        @JavascriptInterface
+        fun namedJobs(): String = Queue.namedJobs()
+
+        @JavascriptInterface
+        fun retryNaming() = Queue.retryNaming()
+
+        /** Gives the files on the phone their new names (or, with restore, their old ones). */
+        @JavascriptInterface
+        fun renameOnPhone(restore: Boolean) {
+            runOnUiThread { renameOnPhone(restore) }
+        }
+
+        @JavascriptInterface
+        fun hasAllFilesAccess(): Boolean = Queue.hasAllFilesAccess()
+
+        /** "All files access" lets Scribe rename recordings as they are named, without asking each time. */
+        @JavascriptInterface
+        fun requestAllFilesAccess() {
+            runOnUiThread {
+                if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return@runOnUiThread
+                val direct = Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION, Uri.parse("package:$packageName"))
+                try { startActivity(direct) } catch (e: Exception) {
+                    runCatching { startActivity(Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION)) }
+                }
+            }
+        }
 
         /** Asks to be left alone by battery optimisation, which on some phones stops background work. */
         @JavascriptInterface

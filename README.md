@@ -49,6 +49,52 @@ If the app is closed, crashes, the phone reboots or the network drops, nothing
 is lost: open Scribe and unfinished files carry on from the last saved part.
 Rate limits and dropped connections are waits, never failures.
 
+### Organising every recording on the phone
+
+Settings › **Organise my recordings**:
+
+1. Tap *Show the folders on this phone* and tick your recorder's folder
+   (on a Xiaomi it is usually `MIUI/sound_recorder/`; it is ticked for you
+   when it looks like one). It shows how many recordings are there, how many
+   hours, and how long the free plan needs for them.
+2. Turn on **Transcribe and name all my recordings automatically**.
+
+Every recording in those folders goes into the queue, oldest first, and so
+does each new one you make: Scribe notices it within seconds while it is open,
+and Android wakes it when it is closed. (If Android will not let it start in
+the background, a notification offers to start with one tap.) Recordings are
+read from the phone only when their turn comes, so a backlog takes no extra
+space. A recording you already shared to Scribe is recognised and not done
+twice.
+
+When a recording is transcribed, Groq's free chat model reads a sample of the
+transcript and gives it a **subject** and a **theme**, and it is named
+`{subject} {n} - {theme}`, e.g. `Storia 03 - La rivoluzione francese`:
+
+- `{n}` is its place among that subject's recordings, **in the order they
+  were recorded** (taken from the date in the file name, or the file's date).
+  If an older recording is named later, the others move up one. Numbers are
+  zero-padded (`03`, `12`) so a list sorted by name is also in order.
+- Give **My subjects** (e.g. `Storia, Filosofia, Matematica`) to make every
+  recording use one of yours (or `Altro`). Without a list Scribe works the
+  subjects out and reuses the names it has already given.
+- **Name format** can be changed, e.g. `{subject}({n})({theme})`.
+
+The names appear in **Your recordings**, which now has a button per subject
+showing that subject's recordings in order.
+
+**Renaming the files themselves** (on by default): Android only lets an app
+rename another app's recordings with permission. Either tap **Rename** on the
+banner in Notes, and Android asks once for the whole batch, or tap **Rename
+without asking each time** and allow *All files access*, and files are renamed
+as soon as they are named. Some recorder apps keep their own list, and may show
+a renamed file as new or lose its tags. **Restore original file names** puts
+every name back.
+
+Naming needs the Groq key (transcribing can fall back to the phone, naming
+cannot). Each recording costs about 2,000 tokens of the chat model's free
+daily allowance, far less than transcription uses.
+
 ### Where things are saved
 
 | What | Where |
@@ -57,6 +103,7 @@ Rate limits and dropped connections are waits, never failures.
 | Your recordings, notes, edits | The app's IndexedDB (`scribe-db`), as before |
 | Groq key | Encrypted with a key held in the Android Keystore; never in plain text, never in the code. (Browser build: AES-GCM with a non-extractable WebCrypto key in IndexedDB.) |
 | Offline model | `Android/data/app.scribe/files/models/` |
+| Names, subjects, original file names (for restoring) | In each job's `job.json`, and the titles in Your recordings |
 
 ### Engines, cost and limits
 
@@ -112,6 +159,9 @@ and speed in the queue, so you can compare on your phone.
 - The signing key is in the repo (`android/signing`) so builds can update each
   other. It is a sideload key for a personal app. To use a private one, add it
   as the `SCRIBE_KEYSTORE_B64` and `SCRIBE_KEYSTORE_PASSWORD` Actions secrets.
+- Organising: a recording under 3 seconds is skipped; a recording you delete
+  from Your recordings is not added again by the next scan; the subject's
+  spelling is the one most of its recordings already use.
 - The queue lives in the Android app. The browser version keeps its simpler
   one-file-at-a-time importer (a web page cannot work in the background).
 
